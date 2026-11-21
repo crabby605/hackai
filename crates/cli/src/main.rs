@@ -479,6 +479,9 @@ fn cmd_login(token: Option<String>, _device: bool) -> io::Result<()> {
     } else {
         "xdg-open"
     };
+    println!("\nPress Enter to open the authorization page in your browser (or Ctrl-C to cancel).");
+    let mut open_browser = String::new();
+    io::stdin().read_line(&mut open_browser)?;
     let _ = std::process::Command::new(opener)
         .arg(verification_uri)
         .spawn();

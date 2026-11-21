@@ -168,7 +168,7 @@ async fn pairing_status(
     }
 
     let row = sqlx::query(
-        "SELECT status, EXTRACT(EPOCH FROM expires_at) AS expires_at \
+        "SELECT status, EXTRACT(EPOCH FROM expires_at)::double precision AS expires_at \
          FROM cli_pairings WHERE device_code = $1",
     )
     .bind(&code)
