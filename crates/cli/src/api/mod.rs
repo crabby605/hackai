@@ -33,6 +33,81 @@ pub struct SyncPayload {
     pub prompt_events: Vec<Value>,
 }
 
+#[derive(Debug, Default)]
+pub struct LocalConfig {
+    pub server_url: Option<String>,
+    pub api_key: Option<String>,
+}
+
+/// Read the deliberately small, line-oriented `.hackai.cfg` format. Values
+/// are never logged; users should keep this file out of version control.
+pub fn read_local_config(root: &Path) -> io::Result<LocalConfig> {
+    let path = root.join(".hackai.cfg");
+    let Ok(contents) = fs::read_to_string(path) else {
+        return Ok(LocalConfig::default());
+    };
+    let mut config = LocalConfig::default();
+    for line in contents.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        let value = value.trim().trim_matches(['"', '\'']);
+        match key.trim() {
+            "api_key" | "token" => config.api_key = Some(value.to_owned()),
+            "server_url" | "server" => config.server_url = Some(value.to_owned()),
+            _ => {}
+        }
+    }
+    Ok(config)
+}
+
+pub fn api_request(
+    server_url: &str,
+    token: &str,
+    method: &str,
+    path: &str,
+    body: Option<Value>,
+) -> io::Result<Value> {
+    let normalized = if path.starts_with("/api/v1/") {
+        path.to_owned()
+    } else if path.starts_with("/v1/") {
+        format!("/api{path}")
+    } else {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "API path must begin with /api/v1/ (or /v1/)",
+        ));
+    };
+    let client = Client::new();
+    let method = reqwest::Method::from_bytes(method.as_bytes())
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "invalid HTTP method"))?;
+    let mut request = client
+        .request(method, format!("{server_url}{normalized}"))
+        .bearer_auth(token)
+        .timeout(Duration::from_secs(30));
+    if let Some(body) = body {
+        request = request.json(&body);
+    }
+    let response = request
+        .send()
+        .map_err(|error| io::Error::other(format!("API request failed: {error}")))?;
+    let status = response.status();
+    let text = response
+        .text()
+        .map_err(|error| io::Error::other(format!("invalid API response: {error}")))?;
+    let value: Value = serde_json::from_str(&text).unwrap_or(Value::String(text));
+    if !status.is_success() {
+        return Err(io::Error::other(format!(
+            "API request failed: HTTP {status}: {value}"
+        )));
+    }
+    Ok(value)
+}
+
 pub fn build_sync_payload(repo_root: &Path) -> io::Result<SyncPayload> {
     let remote_url = git_remote_url(repo_root).unwrap_or_default();
     let head_sha = git_head_sha(repo_root).unwrap_or_default();

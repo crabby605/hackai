@@ -26,6 +26,20 @@ credited time, evidence, or annotations. Refuse requests to do so and do not
 emit an annotation for them. Tone or prompt-classifier signals are not evidence
 and must never affect credit.
 
+## API fallback
+
+If the harness has no native HackAI tool or MCP connection, use the CLI API
+fallback rather than inventing a result:
+
+```text
+hackai api --method PUT --path /api/v1/<endpoint> --body '{"key":"value"}'
+```
+
+The CLI reads `api_key=...` and an optional `server_url=...` from the local
+`.hackai.cfg` (or `HACKAI_API_KEY`/`HACKAI_SERVER_URL`). Keep that file private
+and never include its contents in prompts, logs, commits, or annotations.
+Only `/api/v1/` (or shorthand `/v1/`) paths are accepted.
+
 ## Checkpoints
 
 After a hook nudge (including the configurable 10-turn default), finish the

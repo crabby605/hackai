@@ -17,7 +17,7 @@ use crate::AppState;
 
 // This value is deployed with the server, not accepted from the client.
 const ANNOTATION_POLICY_SHA256: &str =
-    "11e847e0cac656397ad15f43589f5bca06208453fe7fc3ecfe0dea6ade445d90";
+    "1b5e6a4325f6fd9da7d6cc2071bb06086970f14cf72d5c630a319422e92485c6";
 
 #[derive(Deserialize)]
 pub struct SyncRequest {

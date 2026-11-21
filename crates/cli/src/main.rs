@@ -46,6 +46,7 @@ fn read_stored_token(root: &Path) -> Option<String> {
         .get_password()
         .ok()
         .filter(|t| !t.trim().is_empty())
+        .or_else(|| api::read_local_config(root).ok().and_then(|c| c.api_key))
 }
 
 fn write_stored_token(root: &Path, token: &str) -> io::Result<()> {
@@ -118,6 +119,19 @@ enum Command {
         /// Force sync even if queue is empty
         #[arg(long)]
         force: bool,
+    },
+    /// Call an authenticated server endpoint when a harness has no native tool.
+    Api {
+        #[arg(long, default_value = ".")]
+        repo: PathBuf,
+        #[arg(long, default_value = "GET")]
+        method: String,
+        /// Must be /api/v1/... (or the shorthand /v1/...).
+        #[arg(long)]
+        path: String,
+        /// JSON request body, used for POST/PUT/PATCH requests.
+        #[arg(long)]
+        body: Option<String>,
     },
     #[cfg(feature = "dev-tools")]
     Explain,
@@ -726,6 +740,40 @@ fn cmd_sync(repo: &Path, force: bool) -> io::Result<()> {
     Ok(())
 }
 
+fn cmd_api(repo: &Path, method: String, path: String, body: Option<String>) -> io::Result<()> {
+    let root = state::root(repo)?;
+    let config = api::read_local_config(&root)?;
+    let token = std::env::var("HACKAI_API_KEY")
+        .ok()
+        .or(config.api_key)
+        .or_else(|| read_stored_token(&root))
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "no API key; set HACKAI_API_KEY, .hackai.cfg, or run hackai login",
+            )
+        })?;
+    let server_url = std::env::var("HACKAI_SERVER_URL")
+        .ok()
+        .or(config.server_url)
+        .unwrap_or_else(|| "https://hackai.crabby605.hackclub.app".into());
+    let body = body
+        .map(|value| serde_json::from_str(&value))
+        .transpose()
+        .map_err(|error| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("invalid JSON body: {error}"),
+            )
+        })?;
+    let response = api::api_request(&server_url, &token, &method, &path, body)?;
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&response).map_err(io::Error::other)?
+    );
+    Ok(())
+}
+
 fn process_queue(root: &Path, api_token: &str, server_url: &str) -> io::Result<()> {
     let mut queue = state::read_queue(root);
     if queue.is_empty() {
@@ -1203,6 +1251,12 @@ fn main() -> io::Result<()> {
         Command::Logout => cmd_logout()?,
         Command::Whoami => cmd_whoami()?,
         Command::Sync { repo, force } => cmd_sync(&repo, force)?,
+        Command::Api {
+            repo,
+            method,
+            path,
+            body,
+        } => cmd_api(&repo, method, path, body)?,
         #[cfg(feature = "dev-tools")]
         Command::Explain => cmd_explain(),
         #[cfg(feature = "dev-tools")]

@@ -3,6 +3,7 @@
 /fuzz/corpus/
 .env
 .hackai/
+.hackai.cfg
 /ml/*.local.jsonl
 web/.dev.vars
 web/.next/
