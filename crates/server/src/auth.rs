@@ -13,7 +13,9 @@ use axum::{
     response::{IntoResponse, Redirect},
     routing::get,
 };
-use jsonwebtoken::{Algorithm, DecodingKey, Validation, jwk::JwkSet};
+use jsonwebtoken::{
+    Algorithm, DecodingKey, EncodingKey, Header, Validation, decode, encode, jwk::JwkSet,
+};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use sqlx::Row;
@@ -52,9 +54,49 @@ pub struct AuthState {
     pub jwks: RwLock<Option<JwkSet>>,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+struct HackaiSessionClaims {
+    sub: String,
+    iat: usize,
+    exp: usize,
+    iss: String,
+}
+
+const SESSION_TTL_SECONDS: u64 = 30 * 24 * 60 * 60;
+
 impl AuthState {
     pub fn is_enabled(&self) -> bool {
         !self.client_id.is_empty()
+    }
+
+    fn issue_session_token(&self, subject: &str) -> Result<String, AuthError> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|error| AuthError::InvalidToken(error.to_string()))?
+            .as_secs() as usize;
+        encode(
+            &Header::new(Algorithm::HS256),
+            &HackaiSessionClaims {
+                sub: subject.to_owned(),
+                iat: now,
+                exp: now.saturating_add(SESSION_TTL_SECONDS as usize),
+                iss: "hackai".to_owned(),
+            },
+            &EncodingKey::from_secret(self.client_secret.as_bytes()),
+        )
+        .map_err(|error| AuthError::InvalidToken(format!("session issue: {error}")))
+    }
+
+    fn verify_session_token(&self, token: &str) -> Option<String> {
+        let mut validation = Validation::new(Algorithm::HS256);
+        validation.set_issuer(&["hackai"]);
+        decode::<HackaiSessionClaims>(
+            token,
+            &DecodingKey::from_secret(self.client_secret.as_bytes()),
+            &validation,
+        )
+        .ok()
+        .map(|data| data.claims.sub)
     }
 
     /// Disabled auth state — used when client credentials are not configured.
@@ -245,7 +287,7 @@ pub fn session_cookie(id_token: &str, is_https: bool, domain: Option<&str>) -> H
     let secure_flag = if is_https { "; Secure" } else { "" };
     let domain_attribute = domain.map_or_else(String::new, |value| format!("; Domain={value}"));
     let value = format!(
-        "{SESSION_COOKIE}={id_token}; Path=/; HttpOnly{secure_flag}; SameSite=Lax; Max-Age=86400{domain_attribute}"
+        "{SESSION_COOKIE}={id_token}; Path=/; HttpOnly{secure_flag}; SameSite=Lax; Max-Age={SESSION_TTL_SECONDS}{domain_attribute}"
     );
     headers.insert(
         header::SET_COOKIE,
@@ -327,11 +369,15 @@ pub async fn extract_current_user(
     }
 
     if auth.is_enabled() {
-        let sub = match auth.verify_id_token(raw_val).await {
-            Ok(claims) => claims.sub,
-            Err(e) => {
-                eprintln!("ID token verification failed: {e}");
-                return None;
+        let sub = if let Some(subject) = auth.verify_session_token(raw_val) {
+            subject
+        } else {
+            match auth.verify_id_token(raw_val).await {
+                Ok(claims) => claims.sub,
+                Err(e) => {
+                    eprintln!("ID token verification failed: {e}");
+                    return None;
+                }
             }
         };
         let token_hash = Sha256::digest(raw_val.as_bytes());
@@ -526,7 +572,8 @@ async fn callback(
     .await
     .map_err(|e| AuthError::Upstream(format!("user provision: {e}")))?;
 
-    let token_hash = Sha256::digest(id_token.as_bytes());
+    let session_token = app.auth.issue_session_token(&claims.sub)?;
+    let token_hash = Sha256::digest(session_token.as_bytes());
     sqlx::query(
         "INSERT INTO session_ip_bindings (token_hash, client_ip) VALUES ($1, $2) \
          ON CONFLICT (token_hash) DO UPDATE SET client_ip = EXCLUDED.client_ip, last_seen_at = now()",
@@ -540,7 +587,7 @@ async fn callback(
     let is_https = app.auth.redirect_uri.starts_with("https://");
     let mut response = Redirect::to(continue_path).into_response();
     response.headers_mut().extend(session_cookie(
-        &id_token,
+        &session_token,
         is_https,
         app.auth.session_cookie_domain.as_deref(),
     ));
