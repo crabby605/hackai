@@ -8,6 +8,7 @@ set -euo pipefail
 # Configuration
 REPO="crabby605/hackai"
 BINARY_NAME="hackai"
+BINARY_FILE_NAME="hackai"
 INSTALL_DIR="${INSTALL_DIR:-$HOME/.local/bin}"
 GITHUB_API="https://api.github.com/repos/${REPO}"
 
@@ -114,6 +115,7 @@ detect_platform() {
         *)              log_error "Unsupported architecture: $(uname -m)"; exit 1 ;;
     esac
 
+    [[ "$os" == "windows" ]] && BINARY_FILE_NAME="${BINARY_NAME}.exe"
     echo "${os}-${arch}"
 }
 
@@ -210,7 +212,7 @@ download_binary() {
 
     # Find binary
     local binary_path
-    binary_path=$(find "${tmp_dir}" -name "${BINARY_NAME}" -type f | head -1)
+    binary_path=$(find "${tmp_dir}" \( -name "${BINARY_NAME}" -o -name "${BINARY_NAME}.exe" \) -type f | head -1)
     if [[ -z "$binary_path" ]]; then
         log_error "Binary not found in archive"
         exit 1
@@ -233,7 +235,7 @@ install_binary() {
         fi
     fi
 
-    local target_path="${target_dir}/${BINARY_NAME}"
+    local target_path="${target_dir}/${BINARY_FILE_NAME}"
 
     if [[ -f "$target_path" && "$FORCE" != "true" ]]; then
         log_error "Binary already exists at $target_path. Use --force to overwrite."
@@ -253,7 +255,7 @@ install_binary() {
 # Verify installation
 verify_installation() {
     local target_dir="$1"
-    local target_path="${target_dir}/${BINARY_NAME}"
+    local target_path="${target_dir}/${BINARY_FILE_NAME}"
 
     if [[ "$DRY_RUN" == "true" ]]; then
         log_info "[dry-run] would verify installation"
@@ -294,6 +296,7 @@ main() {
 
     local platform
     platform=$(detect_platform)
+    [[ "$platform" == windows-* ]] && BINARY_FILE_NAME="${BINARY_NAME}.exe"
     log_info "Platform: $platform"
 
     if [[ -z "$VERSION" && "$DRY_RUN" == "true" ]]; then
