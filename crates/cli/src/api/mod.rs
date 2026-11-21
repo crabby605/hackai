@@ -150,7 +150,7 @@ fn annotation_policy_sha256() -> io::Result<String> {
 pub fn sync_to_server(server_url: &str, token: &str, payload: SyncPayload) -> io::Result<Value> {
     let client = Client::new();
     let response = client
-        .post(format!("{server_url}/api/v1/sync"))
+        .post(format!("{server_url}/api/v1/upload"))
         .header("Content-Type", "application/json")
         .bearer_auth(token)
         .json(&payload)

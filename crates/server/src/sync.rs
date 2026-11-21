@@ -137,7 +137,11 @@ pub struct SyncResponse {
 }
 
 pub fn routes() -> axum::Router<AppState> {
-    axum::Router::new().route("/api/v1/sync", post(sync))
+    // One canonical upload contract. `/sync` remains a compatibility alias
+    // for older CLIs already installed on users' machines.
+    axum::Router::new()
+        .route("/api/v1/upload", post(sync))
+        .route("/api/v1/sync", post(sync))
 }
 
 async fn sync(
