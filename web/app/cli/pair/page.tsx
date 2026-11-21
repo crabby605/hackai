@@ -15,7 +15,14 @@ export default function CliPairPage() {
       headers: { "content-type": "application/json" },
       credentials: "same-origin",
       body: JSON.stringify({ code }),
-    }).then((response) => setStatus(response.ok ? "approved" : "error")).catch(() => setStatus("error"))
+    }).then((response) => {
+      if (response.status === 401) {
+        const continuePath = `${window.location.pathname}${window.location.search}`
+        window.location.assign(`/login?and=${encodeURIComponent(continuePath)}`)
+        return
+      }
+      setStatus(response.ok ? "approved" : "error")
+    }).catch(() => setStatus("error"))
   }, [code])
 
   return <section className="state-card">

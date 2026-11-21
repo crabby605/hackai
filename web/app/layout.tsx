@@ -48,7 +48,7 @@ export default async function RootLayout({ children }: { children: React.ReactNo
   if (!cookie || !viewer) {
     return (
       <html lang="en" className={cn("dark font-sans")}>
-        <body>{children}</body>
+        <body className="public-shell">{children}</body>
       </html>
     )
   }
