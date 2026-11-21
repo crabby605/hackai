@@ -14,7 +14,16 @@ export function middleware(request: NextRequest) {
     destination.searchParams.set("and", `${request.nextUrl.pathname}${request.nextUrl.search}`)
     if (expired) destination.searchParams.set("expired", "1")
     const response = NextResponse.redirect(destination)
-    if (expired) response.cookies.delete("hackai_session")
+    if (expired) {
+      // Clear both the current host cookie and any legacy parent-domain
+      // cookie. Browsers can send both, with the stale value first.
+      response.cookies.delete("hackai_session")
+      response.cookies.set("hackai_session", "", {
+        domain: ".crabby605.hackclub.app",
+        path: "/",
+        maxAge: 0,
+      })
+    }
     return response
   }
 

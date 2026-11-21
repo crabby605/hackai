@@ -2,6 +2,7 @@ import { cookies } from "next/headers"
 import DashboardPage from "./dashboard/page"
 import { buttonVariants } from "@/components/ui/button"
 import { cn } from "@/lib/utils"
+import { getJson } from "@/app/lib/api"
 
 export default function LandingPage() {
   // `/` is the workspace for a signed-in builder and the public landing page
@@ -11,7 +12,8 @@ export default function LandingPage() {
 
 async function Home() {
   const cookieStore = await cookies()
-  if (cookieStore.get("hackai_session")?.value) return <DashboardPage />
+  const cookie = cookieStore.get("hackai_session")?.value
+  if (cookie && await getJson("/api/v1/me")) return <DashboardPage />
 
   return (
     <section className="landing">
