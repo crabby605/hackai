@@ -1,6 +1,7 @@
 import { cookies } from "next/headers"
 import { redirect } from "next/navigation"
 import { Button } from "@/components/ui/button"
+import { getJson } from "@/app/lib/api"
 
 function localPath(value: string | undefined): string {
   if (!value || !value.startsWith("/") || value.includes("\\") || /%2f|%5c/i.test(value)) return "/"
@@ -19,8 +20,11 @@ export default async function LoginPage({
   const continuePath = localPath(and)
   const cookieStore = await cookies()
   const cookie = cookieStore.get("hackai_session")?.value
+  const viewer = cookie ? await getJson<{ username: string }>("/api/v1/me") : null
 
-  if (cookie) {
+  // A stale cookie must not bounce the user back to the page that sent them
+  // here. Only a verified session is already signed in.
+  if (cookie && viewer) {
     redirect(continuePath)
   }
 
