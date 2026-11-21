@@ -15,18 +15,91 @@ use std::{
 
 const HARNESSES: [&str; 5] = ["codex", "claude-code", "opencode", "antigravity", "aider"];
 
-pub fn install(repo: &Path) -> io::Result<()> {
+#[derive(Debug, Clone, Copy)]
+pub enum InstallScope {
+    Project,
+    Global,
+}
+
+pub fn install(repo: &Path, scope: InstallScope, policy: &str) -> io::Result<()> {
     // Configuration belongs beside the harness project even before the user
     // initializes Git. Event storage still requires a Git worktree later.
-    let root = repo.canonicalize()?;
+    let root = match scope {
+        InstallScope::Project => repo.canonicalize()?,
+        InstallScope::Global => dirs::home_dir()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "home directory not found"))?,
+    };
     install_codex(&root)?;
     install_claude(&root)?;
     install_antigravity(&root)?;
     install_opencode_plugin(&root)?;
-    println!("Installed local adapters for Codex, Claude Code, OpenCode, and Antigravity.");
+    install_mcp_configs(&root)?;
+    install_skill(&root, scope, policy)?;
+    println!(
+        "Installed adapters and automatic HackAI MCP for Codex, Claude Code, OpenCode, and Antigravity."
+    );
     println!(
         "Aider: run `hackai harness aider -- --message \"…\"` (or pass normal Aider arguments).\nAll adapters retain prompt text only in process memory and write stripped local events."
     );
+    Ok(())
+}
+
+fn install_skill(root: &Path, scope: InstallScope, policy: &str) -> io::Result<()> {
+    let canonical = match scope {
+        InstallScope::Project => root.join("annotations/SKILL.md"),
+        InstallScope::Global => root.join(".config/hackai/SKILL.md"),
+    };
+    if let Some(parent) = canonical.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(&canonical, policy)?;
+
+    // Keep the same server-fetched policy where each harness discovers skills.
+    // Every copy is byte-identical; sync hashes the canonical project copy.
+    let skill_roots = match scope {
+        InstallScope::Project => vec![
+            root.join(".codex/skills/hackai-annotate"),
+            root.join(".claude/skills/hackai-annotate"),
+            root.join(".agents/skills/hackai-annotate"),
+            root.join(".opencode/skills/hackai-annotate"),
+        ],
+        InstallScope::Global => vec![
+            root.join(".codex/skills/hackai-annotate"),
+            root.join(".claude/skills/hackai-annotate"),
+            root.join(".agents/skills/hackai-annotate"),
+            root.join(".config/opencode/skills/hackai-annotate"),
+        ],
+    };
+    for directory in skill_roots {
+        fs::create_dir_all(&directory)?;
+        fs::write(directory.join("SKILL.md"), policy)?;
+    }
+    Ok(())
+}
+
+fn install_mcp_configs(root: &Path) -> io::Result<()> {
+    merge_json(
+        root.join(".mcp.json"),
+        json!({"mcpServers": {"hackai": {"command": "hackai", "args": ["mcp"]}}}),
+    )?;
+    merge_json(
+        root.join(".agents/mcp.json"),
+        json!({"mcpServers": {"hackai": {"command": "hackai", "args": ["mcp"]}}}),
+    )?;
+    merge_json(
+        root.join(".opencode/mcp.json"),
+        json!({"mcpServers": {"hackai": {"command": "hackai", "args": ["mcp"]}}}),
+    )?;
+    let codex = root.join(".codex/config.toml");
+    if !codex.exists() {
+        if let Some(parent) = codex.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(
+            codex,
+            "[mcp_servers.hackai]\ncommand = \"hackai\"\nargs = [\"mcp\"]\n",
+        )?;
+    }
     Ok(())
 }
 

@@ -6,6 +6,7 @@ mod archives;
 mod auth;
 mod cli;
 mod ingest;
+mod policy;
 mod rollups;
 mod sse;
 mod sync;
@@ -927,6 +928,7 @@ async fn main() {
         .merge(sync::routes())
         .merge(auth::auth_routes())
         .merge(ingest::routes())
+        .merge(policy::routes())
         .layer(cors)
         .layer(
             ServiceBuilder::new()

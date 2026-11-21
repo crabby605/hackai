@@ -142,6 +142,11 @@ fn read_prompt_metrics(repo_root: &Path) -> Vec<Value> {
 fn annotation_policy_sha256() -> io::Result<String> {
     let path: PathBuf = std::env::var_os("HACKAI_POLICY_PATH")
         .map(Into::into)
+        .or_else(|| {
+            let project = PathBuf::from("annotations/SKILL.md");
+            project.exists().then_some(project)
+        })
+        .or_else(|| dirs::home_dir().map(|home| home.join(".config/hackai/SKILL.md")))
         .unwrap_or_else(|| "annotations/SKILL.md".into());
     let bytes = fs::read(path)?;
     Ok(format!("{:x}", Sha256::digest(bytes)))
@@ -175,6 +180,26 @@ pub fn sync_to_server(server_url: &str, token: &str, payload: SyncPayload) -> io
         }
         Err(error) => Err(io::Error::other(format!("sync request failed: {error}"))),
     }
+}
+
+/// Fetch the server's canonical annotation policy. The policy is public, but
+/// it is always downloaded from the configured server rather than trusted
+/// from a mutable local checkout.
+pub fn fetch_annotation_policy(server_url: &str) -> io::Result<String> {
+    let response = Client::new()
+        .get(format!("{server_url}/api/v1/policy/skill"))
+        .timeout(Duration::from_secs(15))
+        .send()
+        .map_err(|error| io::Error::other(format!("policy request failed: {error}")))?;
+    if !response.status().is_success() {
+        return Err(io::Error::other(format!(
+            "policy request failed: HTTP {}",
+            response.status()
+        )));
+    }
+    response
+        .text()
+        .map_err(|error| io::Error::other(format!("invalid policy response: {error}")))
 }
 
 pub async fn api_get_projects(server_url: &str, token: &str) -> io::Result<Vec<Value>> {

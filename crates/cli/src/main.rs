@@ -16,7 +16,7 @@ mod prompt_model;
 mod state;
 
 use clap::{Parser, Subcommand};
-use dialoguer::{Confirm, Input};
+use dialoguer::{Confirm, Input, Select};
 use hackai_parser::{parse_claude_jsonl, visit_claude_prompts};
 use hackai_scorer::productive_episodes;
 use keyring::Entry;
@@ -197,7 +197,13 @@ enum Command {
         delegation_label: Option<String>,
     },
     /// Set up MCP for all Coding IDEs and store a nonce.
-    Install,
+    Install {
+        #[arg(default_value = ".")]
+        repo: PathBuf,
+        /// Install adapters and the policy into the user profile instead of this project.
+        #[arg(long)]
+        global: bool,
+    },
     /// Install and run privacy-preserving coding-harness adapters.
     Harness {
         #[command(subcommand)]
@@ -276,6 +282,7 @@ enum HarnessCommand {
 fn cmd_track(repo: &Path, local_only: bool, dashboard: bool) -> io::Result<()> {
     let r = state::root(repo)?;
     let s = state::state_dir(&r);
+    let first_setup = !s.exists();
 
     let include_dashboard = if local_only {
         false
@@ -296,6 +303,37 @@ fn cmd_track(repo: &Path, local_only: bool, dashboard: bool) -> io::Result<()> {
     fs::create_dir_all(&s)?;
     fs::write(s.join("tracked"), b"v1\n")?;
     state::audit(&r, "track")?;
+
+    if first_setup {
+        let install = Confirm::new()
+            .with_prompt("Install HackAI hooks, automatic MCP, and the annotation skill?")
+            .default(true)
+            .interact()
+            .map_err(io::Error::other)?;
+        if install {
+            let options = ["This project only", "Globally for my user"];
+            let selected = Select::new()
+                .with_prompt("Where should HackAI install the integration?")
+                .items(&options)
+                .default(0)
+                .interact()
+                .map_err(io::Error::other)?;
+            let server_url = std::env::var("HACKAI_SERVER_URL")
+                .unwrap_or_else(|_| "https://hackai.crabby605.hackclub.app".into());
+            let policy = api::fetch_annotation_policy(&server_url).map_err(|error| {
+                io::Error::other(format!("could not fetch the server policy: {error}"))
+            })?;
+            harness::install(
+                &r,
+                if selected == 0 {
+                    harness::InstallScope::Project
+                } else {
+                    harness::InstallScope::Global
+                },
+                &policy,
+            )?;
+        }
+    }
 
     if include_dashboard {
         let server_url = std::env::var("HACKAI_SERVER_URL")
@@ -1197,7 +1235,15 @@ fn main() -> io::Result<()> {
             delegation_label,
         } => cmd_prompt_lab(log, proficiency_label, delegation_label)?,
         Command::Harness { command } => match command {
-            HarnessCommand::Install { repo } => harness::install(&repo)?,
+            HarnessCommand::Install { repo } => {
+                let r = state::root(&repo)?;
+                let server_url = std::env::var("HACKAI_SERVER_URL")
+                    .unwrap_or_else(|_| "https://hackai.crabby605.hackclub.app".into());
+                let policy = api::fetch_annotation_policy(&server_url).map_err(|error| {
+                    io::Error::other(format!("could not fetch the server policy: {error}"))
+                })?;
+                harness::install(&r, harness::InstallScope::Project, &policy)?;
+            }
             HarnessCommand::Hook {
                 repo,
                 harness,
@@ -1223,8 +1269,22 @@ fn main() -> io::Result<()> {
         Command::Purge { repo } | Command::Uninstall { repo } => {
             cmd_untrack(&repo, true, false)?;
         }
-        Command::Install => {
-            println!("MCP install not yet implemented.");
+        Command::Install { repo, global } => {
+            let r = state::root(&repo)?;
+            let server_url = std::env::var("HACKAI_SERVER_URL")
+                .unwrap_or_else(|_| "https://hackai.crabby605.hackclub.app".into());
+            let policy = api::fetch_annotation_policy(&server_url).map_err(|error| {
+                io::Error::other(format!("could not fetch the server policy: {error}"))
+            })?;
+            harness::install(
+                &r,
+                if global {
+                    harness::InstallScope::Global
+                } else {
+                    harness::InstallScope::Project
+                },
+                &policy,
+            )?;
         }
     };
     Ok(())
