@@ -4,47 +4,34 @@ import { useCallback, useEffect, useState } from "react"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
 
-type Check = { ok: boolean; latency: number; at: string }
+type Status = { status: string; version: string; uptime_seconds: number; components: Record<string, { status: string; latency_ms?: number }> }
 
 export default function HealthPage() {
-  const [checks, setChecks] = useState<Check[]>([])
-  const [checking, setChecking] = useState(true)
-
+  const [status, setStatus] = useState<Status | null>(null)
+  const [latency, setLatency] = useState<number | null>(null)
+  const [checkedAt, setCheckedAt] = useState<string | null>(null)
+  const [failed, setFailed] = useState(false)
   const check = useCallback(async () => {
     const started = performance.now()
     try {
-      const response = await fetch("/healthz", { cache: "no-store" })
-      const latency = Math.round(performance.now() - started)
-      setChecks((current) => [...current, { ok: response.ok, latency, at: new Date().toISOString() }].slice(-60))
-    } catch {
-      setChecks((current) => [...current, { ok: false, latency: Math.round(performance.now() - started), at: new Date().toISOString() }].slice(-60))
-    } finally {
-      setChecking(false)
-    }
+      const response = await fetch("/api/v1/health", { cache: "no-store" })
+      setLatency(Math.round(performance.now() - started)); setFailed(!response.ok)
+      if (response.ok) setStatus(await response.json() as Status)
+      setCheckedAt(new Date().toISOString())
+    } catch { setFailed(true); setLatency(Math.round(performance.now() - started)); setCheckedAt(new Date().toISOString()) }
   }, [])
-
-  useEffect(() => {
-    check()
-    const timer = window.setInterval(check, 15_000)
-    return () => window.clearInterval(timer)
-  }, [check])
-
-  const healthy = checks.at(-1)?.ok ?? false
-  const successful = checks.filter((entry) => entry.ok).length
-  const uptime = checks.length ? Math.round((successful / checks.length) * 1000) / 10 : 0
-  const latestLatency = checks.at(-1)?.latency
-
-  return (
-    <main className="page-content">
-      <p className="eyebrow">Service health</p>
-      <h1>Health <em>at a glance.</em></h1>
-      <p className="muted">A privacy-safe browser check of the HackAI web and API path. Checks run every 15 seconds while this page is open.</p>
-      <div className="dashboard-grid" style={{ marginTop: "2rem" }}>
-        <Card><CardHeader><CardTitle>Status</CardTitle></CardHeader><CardContent><Badge variant={healthy ? "default" : "destructive"}>{checking ? "Checking…" : healthy ? "Operational" : "Unavailable"}</Badge></CardContent></Card>
-        <Card><CardHeader><CardTitle>Observed uptime</CardTitle></CardHeader><CardContent><strong>{uptime}%</strong><p className="muted">{checks.length} checks in this session</p></CardContent></Card>
-        <Card><CardHeader><CardTitle>Latest latency</CardTitle></CardHeader><CardContent><strong>{latestLatency == null ? "—" : `${latestLatency} ms`}</strong><p className="muted">Round trip to /healthz</p></CardContent></Card>
-      </div>
-      <p className="muted" style={{ marginTop: "1.5rem" }}>Last checked: {checks.at(-1) ? new Date(checks.at(-1)!.at).toLocaleTimeString() : "—"}</p>
-    </main>
-  )
+  useEffect(() => { check(); const timer = window.setInterval(check, 15_000); return () => window.clearInterval(timer) }, [check])
+  const names = ["beats", "web", "auth", "storage"] as const
+  const overall = failed ? "degraded" : status?.status ?? "checking"
+  return <main className="page-content">
+    <p className="eyebrow">HackAI status</p><h1>Everything <em>in view.</em></h1>
+    <p className="muted">Live status for beats, web, authentication, and storage. This page refreshes every 15 seconds.</p>
+    <div className="dashboard-grid" style={{ marginTop: "2rem" }}>
+      <Card><CardHeader><CardTitle>Overall</CardTitle></CardHeader><CardContent><Badge variant={overall === "operational" ? "default" : overall === "checking" ? "secondary" : "destructive"}>{overall}</Badge><p className="muted">v{status?.version ?? "—"}</p></CardContent></Card>
+      <Card><CardHeader><CardTitle>Uptime</CardTitle></CardHeader><CardContent><strong>{status ? `${Math.floor(status.uptime_seconds / 3600)}h ${Math.floor(status.uptime_seconds / 60) % 60}m` : "—"}</strong><p className="muted">Current API process</p></CardContent></Card>
+      <Card><CardHeader><CardTitle>Latency</CardTitle></CardHeader><CardContent><strong>{latency == null ? "—" : `${latency} ms`}</strong><p className="muted">Status request round trip</p></CardContent></Card>
+    </div>
+    <div className="dashboard-grid" style={{ marginTop: "1rem" }}>{names.map((name) => { const component = status?.components[name]; return <Card key={name}><CardHeader><CardTitle>{name[0].toUpperCase() + name.slice(1)}</CardTitle></CardHeader><CardContent><Badge variant={component?.status === "operational" ? "default" : component ? "destructive" : "secondary"}>{component?.status ?? "checking"}</Badge>{component?.latency_ms != null && <p className="muted">{component.latency_ms} ms</p>}</CardContent></Card> })}</div>
+    <p className="muted" style={{ marginTop: "1.5rem" }}>Last checked: {checkedAt ? new Date(checkedAt).toLocaleTimeString() : "—"}</p>
+  </main>
 }

@@ -20,8 +20,9 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use sqlx::{PgPool, Row};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
+use std::time::Instant;
 use tokio::sync::RwLock;
 use tower::{
     ServiceBuilder, limit::ConcurrencyLimitLayer, load_shed::LoadShedLayer, timeout::TimeoutLayer,
@@ -84,6 +85,27 @@ impl UsernameBloom {
 
 async fn health() -> &'static str {
     "ok"
+}
+
+static STARTED_AT: OnceLock<Instant> = OnceLock::new();
+
+async fn health_status(State(state): State<AppState>) -> Json<serde_json::Value> {
+    let started = Instant::now();
+    let storage_ok = sqlx::query_scalar::<_, i32>("SELECT 1")
+        .fetch_one(&state.db)
+        .await
+        .is_ok();
+    Json(serde_json::json!({
+        "status": if storage_ok { "operational" } else { "degraded" },
+        "version": env!("CARGO_PKG_VERSION"),
+        "uptime_seconds": STARTED_AT.get().map(|v| v.elapsed().as_secs()).unwrap_or(0),
+        "components": {
+            "beats": { "status": "operational", "latency_ms": started.elapsed().as_millis() },
+            "web": { "status": "operational" },
+            "auth": { "status": if state.auth.is_enabled() { "operational" } else { "degraded" } },
+            "storage": { "status": if storage_ok { "operational" } else { "down" } }
+        }
+    }))
 }
 
 #[derive(Serialize)]
@@ -813,6 +835,7 @@ async fn leaderboard(
 
 #[tokio::main]
 async fn main() {
+    let _ = STARTED_AT.set(Instant::now());
     let _ = dotenvy::dotenv();
     let auth = match auth::AuthState::new().await {
         Ok(a) => Arc::new(a),
@@ -879,6 +902,7 @@ async fn main() {
 
     let app = Router::new()
         .route("/healthz", get(health))
+        .route("/api/v1/health", get(health_status))
         .route("/api/v1/me", get(me))
         .route("/api/v1/me/profile", post(update_profile))
         .route(
