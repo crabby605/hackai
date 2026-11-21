@@ -152,7 +152,13 @@ async fn complete_pairing(
         return Err(StatusCode::CONFLICT);
     }
 
-    // Persist only the hash; the raw token is delivered once via the poll endpoint.
+    // Keep one active credential per account. Persist only the hash; the raw
+    // token is delivered once via the poll endpoint.
+    sqlx::query("UPDATE api_keys SET revoked_at = now() WHERE user_id = $1 AND revoked_at IS NULL")
+        .bind(user_id)
+        .execute(&state.db)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     let _ = sqlx::query("INSERT INTO api_keys (user_id, token_hash) VALUES ($1, $2)")
         .bind(user_id)
         .bind(token_hash.as_slice())
