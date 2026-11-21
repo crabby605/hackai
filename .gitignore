@@ -10,3 +10,5 @@ web/public/
 .DS_Store
 serverless/
 web/node_modules/
+web/.open-next/
+web/.wrangler/
