@@ -126,6 +126,7 @@ body, .app-shell { background: var(--bg); }
 .state-card { width: min(100% - 2rem, 620px); margin-inline: auto; }
 .public-shell { display: grid; min-height: 100vh; place-items: center; }
 .public-shell .state-card { margin: 0 auto; }
+em { font-style: normal; font-family: inherit; }
 .settings-api-key { margin-top: 1rem; }
 .api-key-row { display: flex; align-items: center; flex-wrap: wrap; gap: .65rem; }
 .api-key-row code { min-width: 12rem; padding: .7rem .8rem; color: var(--ink); border: 1px solid var(--line-strong); background: var(--panel-raised); letter-spacing: .04em; }
