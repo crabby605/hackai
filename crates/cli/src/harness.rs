@@ -61,12 +61,14 @@ fn install_skill(root: &Path, scope: InstallScope, policy: &str) -> io::Result<(
             root.join(".codex/skills/hackai-annotate"),
             root.join(".claude/skills/hackai-annotate"),
             root.join(".agents/skills/hackai-annotate"),
+            root.join(".gemini/skills/hackai-annotate"),
             root.join(".opencode/skills/hackai-annotate"),
         ],
         InstallScope::Global => vec![
             root.join(".codex/skills/hackai-annotate"),
             root.join(".claude/skills/hackai-annotate"),
             root.join(".agents/skills/hackai-annotate"),
+            root.join(".gemini/skills/hackai-annotate"),
             root.join(".config/opencode/skills/hackai-annotate"),
         ],
     };
@@ -84,6 +86,10 @@ fn install_mcp_configs(root: &Path) -> io::Result<()> {
     )?;
     merge_json(
         root.join(".agents/mcp.json"),
+        json!({"mcpServers": {"hackai": {"command": "hackai", "args": ["mcp"]}}}),
+    )?;
+    merge_json(
+        root.join(".gemini/settings.json"),
         json!({"mcpServers": {"hackai": {"command": "hackai", "args": ["mcp"]}}}),
     )?;
     merge_json(

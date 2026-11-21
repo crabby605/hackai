@@ -26,8 +26,9 @@ function formatDuration(seconds: number): string {
 }
 
 export default async function ProjectsPage() {
+  const viewer = await getJson<{ username: string }>("/api/v1/me")
   const projects = await getJson<ProjectSummary[]>("/api/v1/projects")
-  if (!projects) {
+  if (!viewer) {
     return (
       <section className="state-card">
         <p className="eyebrow">Private by default</p>
