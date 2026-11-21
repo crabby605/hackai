@@ -11,7 +11,9 @@ or a commit lands.
 
 Emit only one of: `debugging`, `guided`, `delegated`, `reading`, or `exploring`.
 
-Call `hackai annotate --window <window-id> --label <label> --evidence <pointer>`.
+Call the HackAI MCP `annotate` tool. The standalone `hackai annotate` command is
+intentionally unavailable because annotations must originate from an agent tool
+call, not a user's shell.
 Evidence must identify transcript turn IDs and/or git hunk hashes that exist in
 the local evidence. Do not send prompt text, tool output, cwd, absolute paths,
 free-form praise, or a numeric score.
@@ -28,8 +30,9 @@ and must never affect credit.
 
 ## API fallback
 
-If the harness has no native HackAI tool or MCP connection, use the CLI API
-fallback rather than inventing a result:
+If the harness has no native HackAI tool or MCP connection, do not emit an
+annotation. The API fallback is for telemetry and policy operations only; it
+cannot create annotations.
 
 ```text
 hackai api --method PUT --path /api/v1/<endpoint> --body '{"key":"value"}'

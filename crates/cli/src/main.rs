@@ -903,17 +903,11 @@ fn cmd_annotate(
     evidence: Vec<String>,
     chapter_title: Option<String>,
 ) -> io::Result<()> {
-    let r = state::root(repo)?;
-    let annotation = state::annotation_value(
-        &window,
-        &label,
-        &user_role,
-        &evidence,
-        chapter_title.as_deref(),
-    )?;
-    state::write_annotation(&r, &annotation)?;
-    println!("Advisory annotation recorded locally; it cannot raise credit.");
-    Ok(())
+    let _ = (repo, window, label, user_role, evidence, chapter_title);
+    Err(io::Error::new(
+        io::ErrorKind::PermissionDenied,
+        "annotations are agent-only; use the HackAI MCP annotate tool from the coding harness",
+    ))
 }
 
 fn cmd_mcp() -> io::Result<()> {
