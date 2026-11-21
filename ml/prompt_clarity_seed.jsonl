@@ -1,0 +1,36 @@
+{"prompt":"fix my app","label":"new"}
+{"prompt":"make this work","label":"new"}
+{"prompt":"help with rust","label":"new"}
+{"prompt":"why is this broken","label":"new"}
+{"prompt":"build a website for me","label":"new"}
+{"prompt":"can you improve this code","label":"new"}
+{"prompt":"add auth","label":"new"}
+{"prompt":"the tests are failing","label":"new"}
+{"prompt":"make the UI better","label":"new"}
+{"prompt":"write the backend","label":"new"}
+{"prompt":"fix the bug quickly","label":"new"}
+{"prompt":"I need a database","label":"new"}
+{"prompt":"Fix the login redirect in the Next.js app.","label":"developing"}
+{"prompt":"Add a Rust command that prints the current project status.","label":"developing"}
+{"prompt":"The API returns 500 after a user signs in; help trace the cause.","label":"developing"}
+{"prompt":"Add input validation to the profile form and show a helpful error.","label":"developing"}
+{"prompt":"Refactor this parser so malformed JSON lines are skipped.","label":"developing"}
+{"prompt":"Write tests for the score calculation around zero-duration windows.","label":"developing"}
+{"prompt":"Add a dark mode toggle that remembers the selected theme.","label":"developing"}
+{"prompt":"Make the sync request retry after a transient network error.","label":"developing"}
+{"prompt":"Explain why this SQL query is slow and suggest an index.","label":"developing"}
+{"prompt":"Create a CLI subcommand for exporting a JSON report.","label":"developing"}
+{"prompt":"Update the endpoint to reject invalid labels.","label":"developing"}
+{"prompt":"Help me make the dashboard accessible to keyboard users.","label":"developing"}
+{"prompt":"In crates/cli/src/state/mod.rs, add a read-only helper for annotations.jsonl. Preserve the existing JSONL format, ignore malformed lines, and add unit tests for an absent file and a malformed line.","label":"proficient"}
+{"prompt":"Investigate the 401 from POST /api/v1/sync. Do not change authentication behavior until you identify the failing branch. Add a regression test, then report the request shape and status code.","label":"proficient"}
+{"prompt":"Add --dry-run to the export command. It must print the destination and record count without creating or overwriting a file. Cover both dry-run and normal export in tests.","label":"proficient"}
+{"prompt":"Change the profile form validation so usernames allow lowercase letters, digits, and hyphens only. Keep the 3-32 character limit, show the existing inline error component, and add valid/invalid cases.","label":"proficient"}
+{"prompt":"Optimize the episode lookup query for project_id and started_at. First inspect the schema and current query plan, then add only the needed index migration. Do not change response fields.","label":"proficient"}
+{"prompt":"Implement a local MCP tool named get_episode_summary. It should return count, credited seconds, and resolved count from episodes.json; if the file is absent, return zeros. Do not contact the API.","label":"proficient"}
+{"prompt":"Fix the JSON-RPC parser so notifications receive no response. Retain the current error code for malformed JSON and add tests for notification, request, and malformed input.","label":"proficient"}
+{"prompt":"Add a 10-second timeout to the HTTP sync client. Preserve the existing error message format and verify a timeout is queued rather than discarded.","label":"proficient"}
+{"prompt":"Update the dashboard table to expose sort order through aria-sort. Keep visual styling unchanged and add a focused test for ascending and descending headers.","label":"proficient"}
+{"prompt":"For the annotation endpoint, reject an empty evidence string after trimming whitespace. Return 400, do not insert a row, and add an integration test covering whitespace-only evidence.","label":"proficient"}
+{"prompt":"Add a migration for a unique user/project/session/start constraint. Make the sync projection idempotent on that key and confirm repeated queue delivery does not duplicate credited seconds.","label":"proficient"}
+{"prompt":"Trace why the CLI cannot find a git worktree root on Windows paths. Preserve normal repository behavior, add a Windows-style fixture, and include the expected resolved state directory in the test assertion.","label":"proficient"}

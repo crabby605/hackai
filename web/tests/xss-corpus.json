@@ -1,0 +1,45 @@
+{
+  "control_characters": [
+    { "id": "ctl-null", "payload": "\u0000" },
+    { "id": "ctl-soh", "payload": "\u0001" },
+    { "id": "ctl-vt", "payload": "\u000b" },
+    { "id": "ctl-ff", "payload": "\u000c" },
+    { "id": "ctl-us", "payload": "\u001f" },
+    { "id": "ctl-del", "payload": "\u007f" }
+  ],
+  "html_script": [
+    { "id": "html-script", "payload": "<script>alert(1)</script>" },
+    { "id": "img-onerror", "payload": "<img src=x onerror=alert(1)>" },
+    { "id": "svg-onload", "payload": "<svg onload=alert(1)>" },
+    { "id": "body-onload", "payload": "<body onload=alert(1)>" },
+    { "id": "iframe-js", "payload": "<iframe src=javascript:alert(1)>" },
+    { "id": "details-ontoggle", "payload": "<details open ontoggle=alert(1)>" }
+  ],
+  "attribute_breaking": [
+    { "id": "attr-dq", "payload": "\"" },
+    { "id": "attr-sq", "payload": "'" },
+    { "id": "attr-eq", "payload": "=" },
+    { "id": "attr-lt", "payload": "<" },
+    { "id": "attr-gt", "payload": ">" },
+    { "id": "attr-slash", "payload": "/" },
+    { "id": "attr-break-dq", "payload": "\"><script>alert(1)</script>" },
+    { "id": "attr-break-sq", "payload": "' onmouseover=alert(1) '" }
+  ],
+  "bidi_marks": [
+    { "id": "bidi-lre", "payload": "‪" },
+    { "id": "bidi-rle", "payload": "‫" },
+    { "id": "bidi-pdf", "payload": "‬" },
+    { "id": "bidi-lro", "payload": "‭" },
+    { "id": "bidi-rlo", "payload": "‮" },
+    { "id": "bidi-lri", "payload": "⁦" },
+    { "id": "bidi-rli", "payload": "⁧" },
+    { "id": "bidi-fsi", "payload": "⁨" },
+    { "id": "bidi-pdi", "payload": "⁩" }
+  ],
+  "url_like": [
+    { "id": "url-javascript", "payload": "javascript:alert(1)" },
+    { "id": "url-data", "payload": "data:text/html,<script>alert(1)</script>" },
+    { "id": "url-vbscript", "payload": "vbscript:alert(1)" },
+    { "id": "url-file", "payload": "file:///etc/passwd" }
+  ]
+}

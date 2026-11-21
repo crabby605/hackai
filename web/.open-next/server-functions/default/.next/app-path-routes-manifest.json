@@ -1,0 +1,21 @@
+{
+  "/logout/route": "/logout",
+  "/admin/page": "/admin",
+  "/401/page": "/401",
+  "/archives/page": "/archives",
+  "/cli/pair/page": "/cli/pair",
+  "/_not-found/page": "/_not-found",
+  "/admin/users/[id]/page": "/admin/users/[id]",
+  "/503/page": "/503",
+  "/leaderboard/page": "/leaderboard",
+  "/page": "/",
+  "/landing/page": "/landing",
+  "/unauthorized/page": "/unauthorized",
+  "/unavailable/page": "/unavailable",
+  "/settings/page": "/settings",
+  "/dashboard/page": "/dashboard",
+  "/login/page": "/login",
+  "/profile/[username]/page": "/profile/[username]",
+  "/projects/page": "/projects",
+  "/struggles/page": "/struggles"
+}

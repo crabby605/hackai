@@ -1,0 +1,15 @@
+[package]
+name = "hackai-gitx"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+[dependencies]
+hackai-schema = { path = "../schema" }
+thiserror.workspace = true
+hmac = "0.13"
+sha2 = "0.11"
+hex = "0.4"
+[dev-dependencies]
+tempfile = "3"
+[lints]
+workspace = true

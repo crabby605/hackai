@@ -1,0 +1,11 @@
+/target/
+/fuzz/artifacts/
+/fuzz/corpus/
+.env
+.hackai/
+/ml/*.local.jsonl
+web/.dev.vars
+web/.next/
+web/public/
+.DS_Store
+serverless/

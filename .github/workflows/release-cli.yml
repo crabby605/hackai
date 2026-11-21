@@ -1,0 +1,167 @@
+name: Release CLI
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version tag (e.g., v0.1.0)'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            artifact: hackai-x86_64-linux
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+            artifact: hackai-aarch64-linux
+            cross: true
+          - target: x86_64-apple-darwin
+            os: macos-latest
+            artifact: hackai-x86_64-macos
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            artifact: hackai-aarch64-macos
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            artifact: hackai-x86_64-windows
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install cross (for cross-compilation)
+        if: matrix.cross == 'true'
+        uses: taiki-e/install-action@cross
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Build
+        if: matrix.cross != 'true'
+        run: cargo build --release --bin hackai --target ${{ matrix.target }}
+
+      - name: Cross build
+        if: matrix.cross == 'true'
+        run: cross build --release --bin hackai --target ${{ matrix.target }}
+
+      - name: Package (Unix)
+        if: matrix.os != 'windows-latest'
+        run: |
+          mkdir -p dist/${{ matrix.artifact }}
+          cp target/${{ matrix.target }}/release/hackai dist/${{ matrix.artifact }}/
+          cd dist/${{ matrix.artifact }}
+          tar -czf ../${{ matrix.artifact }}.tar.gz hackai
+          sha256sum ../${{ matrix.artifact }}.tar.gz > ../${{ matrix.artifact }}.tar.gz.sha256
+
+      - name: Package (Windows)
+        if: matrix.os == 'windows-latest'
+        run: |
+          mkdir dist/${{ matrix.artifact }}
+          cp target/${{ matrix.target }}/release/hackai.exe dist/${{ matrix.artifact }}/
+          cd dist/${{ matrix.artifact }}
+          7z a ../${{ matrix.artifact }}.zip hackai.exe
+          cd ..
+          certutil -hashfile ${{ matrix.artifact }}.zip SHA256 > ${{ matrix.artifact }}.zip.sha256
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: dist/${{ matrix.artifact }}/*
+          retention-days: 1
+
+  release:
+    name: Create Release
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: List artifacts
+        run: ls -la dist/
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*/*
+          generate_release_notes: true
+          draft: false
+          prerelease: ${{ contains(github.ref, '-') }}
+
+  publish-installer:
+    name: Publish Installer
+    needs: release
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Prepare installer
+        run: |
+          VERSION=${GITHUB_REF#refs/tags/}
+          sed -i "s|REPO=\"hackclub/hackai\"|REPO=\"${{ github.repository }}\"|g" scripts/install-cli.sh
+          sed -i "s|https://your-domain.com/install-cli.sh|https://github.com/${{ github.repository }}/releases/download/${VERSION}/install-cli.sh|g" scripts/install-cli.sh
+
+      - name: Upload installer to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: scripts/install-cli.sh
+          tag_name: ${{ github.ref_name }}
+
+  # Optional: Publish to package managers
+  # homebrew:
+  #   name: Update Homebrew Formula
+  #   needs: release
+  #   runs-on: ubuntu-latest
+  #   if: startsWith(github.ref, 'refs/tags/') && !contains(github.ref, '-')
+  #   steps:
+  #     - uses: actions/checkout@v4
+  #     - name: Update Homebrew
+  #       uses: mislav/bump-homebrew-formula-action@v3
+  #       with:
+  #         formula-name: hackai
+  #         formula-path: Formula/hackai.rb
+  #         tap-repo: hackclub/homebrew-tap
+  #         token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+
+  # scoop:
+  #   name: Update Scoop Manifest
+  #   needs: release
+  #   runs-on: ubuntu-latest
+  #   if: startsWith(github.ref, 'refs/tags/') && !contains(github.ref, '-')
+  #   steps:
+  #     - uses: actions/checkout@v4
+  #     - name: Update Scoop
+  #       run: |
+  #         # Update bucket manifest
+  #       env:
+  #         SCOOP_BUCKET_TOKEN: ${{ secrets.SCOOP_BUCKET_TOKEN }}

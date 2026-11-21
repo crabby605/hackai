@@ -1,0 +1,3 @@
+{"timestamp":1735689600000,"role":"user","message":{"content":"synthetic prompt"}}
+{"timestamp":1735689601000,"role":"assistant","message":{"content":"synthetic tool result"}}
+{not valid json}
