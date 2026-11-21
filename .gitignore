@@ -12,3 +12,5 @@ serverless/
 web/node_modules/
 web/.open-next/
 web/.wrangler/
+deploy/
+web/wrangler.jsonc
