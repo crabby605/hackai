@@ -168,8 +168,7 @@ async fn pairing_status(
     }
 
     let row = sqlx::query(
-        "SELECT status, EXTRACT(EPOCH FROM expires_at)::double precision AS expires_at \
-         FROM cli_pairings WHERE device_code = $1",
+        "SELECT CASE WHEN status = 'pending' AND expires_at <= now() THEN 'expired' ELSE status END AS status FROM cli_pairings WHERE device_code = $1",
     )
     .bind(&code)
     .fetch_optional(&state.db)
@@ -180,15 +179,5 @@ async fn pairing_status(
     let status: String = row
         .try_get("status")
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    let expires_at: f64 = row
-        .try_get("expires_at")
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    let status = if status == "pending" && expires_at < now_secs() as f64 {
-        "expired"
-    } else {
-        status.as_str()
-    };
-
     Ok(Json(serde_json::json!({ "status": status })))
 }
