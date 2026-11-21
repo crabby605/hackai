@@ -728,7 +728,9 @@ pub struct ProfileResponse {
 fn is_valid_username(username: &str) -> bool {
     !username.is_empty()
         && username.len() <= 30
-        && username.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+        && username
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-')
         && !username.starts_with('-')
         && !username.ends_with('-')
 }

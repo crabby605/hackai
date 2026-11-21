@@ -216,9 +216,15 @@ async fn set_admin(
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
     .ok_or(StatusCode::NOT_FOUND)?;
     Ok(Json(AdminUser {
-        id: row.try_get("id").map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
-        username: row.try_get("username").map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
-        is_admin: row.try_get("is_admin").map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
+        id: row
+            .try_get("id")
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
+        username: row
+            .try_get("username")
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
+        is_admin: row
+            .try_get("is_admin")
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
         display_name: row.try_get("display_name").ok(),
         email: row.try_get("email").ok(),
         slack_id: row.try_get("slack_id").ok(),

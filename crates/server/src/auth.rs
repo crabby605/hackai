@@ -277,7 +277,9 @@ pub async fn extract_current_user(
     db: &sqlx::Pool<sqlx::Postgres>,
     headers: &HeaderMap,
 ) -> Option<String> {
-    if let Some(value) = headers.get(header::AUTHORIZATION).and_then(|v| v.to_str().ok())
+    if let Some(value) = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
         && let Some(token) = value.strip_prefix("Bearer ").map(str::trim)
     {
         let hash = Sha256::digest(token.as_bytes());
@@ -291,7 +293,9 @@ pub async fn extract_current_user(
         .ok()
         .flatten()?;
         let banned: bool = row.try_get("banned").ok()?;
-        if banned { return None; }
+        if banned {
+            return None;
+        }
         return row.try_get("auth_subject").ok();
     }
     let cookie = headers.get(header::COOKIE)?.to_str().ok()?;
