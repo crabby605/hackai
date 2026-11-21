@@ -6,7 +6,7 @@
 set -euo pipefail
 
 # Configuration
-REPO="hackclub/hackai"
+REPO="crabby605/hackai"
 BINARY_NAME="hackai"
 INSTALL_DIR="${INSTALL_DIR:-$HOME/.local/bin}"
 GITHUB_API="https://api.github.com/repos/${REPO}"

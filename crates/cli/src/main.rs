@@ -60,7 +60,7 @@ fn clear_stored_token(root: &Path) -> io::Result<()> {
 }
 
 #[derive(Parser)]
-#[command(name = "hackai", about = "Local-first AI coding time tracker")]
+#[command(name = "hackai", version, about = "Local-first AI coding time tracker")]
 struct Cli {
     #[command(subcommand)]
     command: Command,
