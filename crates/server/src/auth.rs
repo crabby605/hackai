@@ -15,6 +15,8 @@ use axum::{
 };
 use jsonwebtoken::{Algorithm, DecodingKey, Validation, jwk::JwkSet};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use sqlx::Row;
 use tokio::sync::RwLock;
 use uuid::Uuid;
 
@@ -275,6 +277,23 @@ pub async fn extract_current_user(
     db: &sqlx::Pool<sqlx::Postgres>,
     headers: &HeaderMap,
 ) -> Option<String> {
+    if let Some(value) = headers.get(header::AUTHORIZATION).and_then(|v| v.to_str().ok())
+        && let Some(token) = value.strip_prefix("Bearer ").map(str::trim)
+    {
+        let hash = Sha256::digest(token.as_bytes());
+        let row = sqlx::query(
+            "SELECT u.auth_subject, u.banned FROM api_keys k JOIN users u ON u.id = k.user_id
+             WHERE k.token_hash = $1 AND k.revoked_at IS NULL",
+        )
+        .bind(hash.as_slice())
+        .fetch_optional(db)
+        .await
+        .ok()
+        .flatten()?;
+        let banned: bool = row.try_get("banned").ok()?;
+        if banned { return None; }
+        return row.try_get("auth_subject").ok();
+    }
     let cookie = headers.get(header::COOKIE)?.to_str().ok()?;
     let raw_val = cookie
         .split(';')

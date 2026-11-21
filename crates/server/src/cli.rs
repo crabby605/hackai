@@ -84,7 +84,7 @@ async fn create_pairing(
     Ok(Json(serde_json::json!({
         "device_code": device_code,
         "user_code": code,
-        "verification_uri": format!("/cli/pair?code={code}"),
+        "verification_uri": format!("{}/cli/pair?code={code}", std::env::var("HACKAI_PUBLIC_URL").unwrap_or_else(|_| "https://hackai.crabby605.hackclub.app".to_string())),
         "expires_in": PAIRING_TTL_SECS,
     })))
 }
