@@ -1,5 +1,6 @@
 #!/bin/sh
 set -eu
+export PATH=/root/.cargo/bin:/usr/local/bin:/usr/bin:/bin
 
 LOCK=/run/lock/hackai-auto-update.lock
 exec 9>"$LOCK"
