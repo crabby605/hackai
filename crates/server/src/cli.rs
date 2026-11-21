@@ -172,9 +172,11 @@ async fn pairing_status(
     State(state): State<AppState>,
     Path(code): Path<String>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
-    // Deliver the plaintext installation token exactly once, atomically.
+    // Deliver the freshly-issued token idempotently during this pairing window.
+    // A second poll can happen when a terminal is restarted or two CLI loops
+    // overlap; losing the token would strand an otherwise approved login.
     if let Some(row) = sqlx::query(
-        "UPDATE cli_pairings SET token = NULL, consumed_at = now(), status = 'consumed' \
+        "UPDATE cli_pairings SET consumed_at = COALESCE(consumed_at, now()), status = 'consumed' \
          WHERE device_code = $1 AND token IS NOT NULL \
          RETURNING token",
     )
