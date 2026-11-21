@@ -428,10 +428,7 @@ async fn callback(
                 .find_map(|part| part.trim().strip_prefix(&format!("{OIDC_STATE_COOKIE}=")))
         });
     let (expected_state, continue_path) = match cookie_val {
-        Some(v) if v.contains('|') => {
-            let (s, c) = v.split_once('|').unwrap();
-            (s, c)
-        }
+        Some(v) if v.contains('|') => v.split_once('|').unwrap_or((v, "/dashboard")),
         Some(v) => (v, "/dashboard"),
         None => ("", "/dashboard"),
     };

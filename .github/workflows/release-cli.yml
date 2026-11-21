@@ -84,7 +84,7 @@ jobs:
           cd dist/${{ matrix.artifact }}
           7z a ../${{ matrix.artifact }}.zip hackai.exe
           cd ..
-          certutil -hashfile ${{ matrix.artifact }}.zip SHA256 > ${{ matrix.artifact }}.zip.sha256
+          powershell -NoProfile -Command "(Get-FileHash '${{ matrix.artifact }}.zip' -Algorithm SHA256).Hash.ToLower() + '  ${{ matrix.artifact }}.zip' | Out-File -Encoding ascii '${{ matrix.artifact }}.zip.sha256'"
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
@@ -97,7 +97,7 @@ jobs:
     name: Create Release
     needs: build
     runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/')
+    if: always() && needs.build.result == 'success'
     steps:
       - name: Download all artifacts
         uses: actions/download-artifact@v4
@@ -112,22 +112,23 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: dist/*/*
+          tag_name: ${{ inputs.version || github.ref_name }}
           generate_release_notes: true
           draft: false
-          prerelease: ${{ contains(github.ref, '-') }}
+          prerelease: ${{ contains(inputs.version || github.ref_name, '-') }}
 
   publish-installer:
     name: Publish Installer
     needs: release
     runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/')
+    if: always() && needs.release.result == 'success'
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
       - name: Prepare installer
         run: |
-          VERSION=${GITHUB_REF#refs/tags/}
+          VERSION='${{ inputs.version || github.ref_name }}'
           sed -i "s|REPO=\"hackclub/hackai\"|REPO=\"${{ github.repository }}\"|g" scripts/install-cli.sh
           sed -i "s|https://your-domain.com/install-cli.sh|https://github.com/${{ github.repository }}/releases/download/${VERSION}/install-cli.sh|g" scripts/install-cli.sh
 

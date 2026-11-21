@@ -136,7 +136,17 @@ download_binary() {
     local ext="tar.gz"
     [[ "$platform" == windows-* ]] && ext="zip"
 
+    # Release CLI publishes the stable installer names below. Keep a legacy
+    # target fallback so older tags remain installable during migration.
     local asset_name="${BINARY_NAME}-${platform}.${ext}"
+    local legacy_platform=""
+    case "$platform" in
+        linux-x86_64) legacy_platform="x86_64-unknown-linux-gnu" ;;
+        linux-aarch64) legacy_platform="aarch64-unknown-linux-gnu" ;;
+        macos-x86_64) legacy_platform="x86_64-apple-darwin" ;;
+        macos-aarch64) legacy_platform="aarch64-apple-darwin" ;;
+    esac
+    local legacy_asset_name="${BINARY_NAME}-${legacy_platform}.${ext}"
     local url="https://github.com/${REPO}/releases/download/${version}/${asset_name}"
     local checksum_url="${url}.sha256"
 
@@ -147,10 +157,22 @@ download_binary() {
     trap 'rm -rf "${tmp_dir:-}"' EXIT
 
     if command -v curl >/dev/null 2>&1; then
-        curl -fsSL -o "${tmp_dir}/${asset_name}" "$url"
+        if ! curl -fsSL -o "${tmp_dir}/${asset_name}" "$url"; then
+            [[ -n "$legacy_platform" ]] || exit 1
+            asset_name="$legacy_asset_name"
+            url="https://github.com/${REPO}/releases/download/${version}/${asset_name}"
+            checksum_url="${url}.sha256"
+            curl -fsSL -o "${tmp_dir}/${asset_name}" "$url"
+        fi
         curl -fsSL -o "${tmp_dir}/${asset_name}.sha256" "$checksum_url" 2>/dev/null || true
     elif command -v wget >/dev/null 2>&1; then
-        wget -q -O "${tmp_dir}/${asset_name}" "$url"
+        if ! wget -q -O "${tmp_dir}/${asset_name}" "$url"; then
+            [[ -n "$legacy_platform" ]] || exit 1
+            asset_name="$legacy_asset_name"
+            url="https://github.com/${REPO}/releases/download/${version}/${asset_name}"
+            checksum_url="${url}.sha256"
+            wget -q -O "${tmp_dir}/${asset_name}" "$url"
+        fi
         wget -q -O "${tmp_dir}/${asset_name}.sha256" "$checksum_url" 2>/dev/null || true
     else
         log_error "curl or wget required"

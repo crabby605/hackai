@@ -669,6 +669,8 @@ fn cmd_sync(repo: &Path, force: bool) -> io::Result<()> {
             }
             Err(e) => {
                 eprintln!("Sync failed: {e}");
+                state::enqueue_sync(&r, &r, payload.clone())?;
+                println!("Sync queued locally (will retry on next successful sync).");
             }
         }
     }
@@ -720,11 +722,9 @@ fn process_queue(root: &Path, api_token: &str, server_url: &str) -> io::Result<(
             Err(e) => {
                 eprintln!("Sync failed for {}: {e}", item.project_name);
                 item.attempts += 1;
-                if item.attempts < 5 {
-                    remaining.push(item);
-                } else {
-                    eprintln!("Max retries exceeded for {}, dropping", item.project_name);
-                }
+                // Keep failed work durable; transient outages can last longer
+                // than five attempts and must not silently discard activity.
+                remaining.push(item);
             }
         }
     }

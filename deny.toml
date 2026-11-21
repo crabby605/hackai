@@ -2,4 +2,4 @@
 unmaintained = "workspace"
 yanked = "deny"
 [licenses]
-allow = ["Apache-2.0", "MIT", "Unicode-3.0", "BSD-3-Clause", "ISC", "Zlib"]
+allow = ["AGPL-3.0-or-later", "Apache-2.0", "MIT", "Unicode-3.0", "BSD-3-Clause", "ISC", "Zlib", "CC0-1.0", "OpenSSL"]

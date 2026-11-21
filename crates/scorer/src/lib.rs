@@ -731,11 +731,13 @@ pub fn productive_episodes<
             || last_bucket_time.is_some_and(|last| bucket_time.0 > last.0 + config.bucket_millis)
         {
             if !current_episode_buckets.is_empty() {
-                episodes.push(finalize_episode_from_buckets(
-                    current_project.take().unwrap(),
-                    &mut current_episode_buckets,
-                    config,
-                ));
+                if let Some(project_name) = current_project.take() {
+                    episodes.push(finalize_episode_from_buckets(
+                        project_name,
+                        &mut current_episode_buckets,
+                        config,
+                    ));
+                }
             }
             current_project = Some(project);
             current_episode_buckets.clear();
@@ -746,11 +748,13 @@ pub fn productive_episodes<
     }
 
     if !current_episode_buckets.is_empty() {
-        episodes.push(finalize_episode_from_buckets(
-            current_project.take().unwrap(),
-            &mut current_episode_buckets,
-            config,
-        ));
+        if let Some(project_name) = current_project.take() {
+            episodes.push(finalize_episode_from_buckets(
+                project_name,
+                &mut current_episode_buckets,
+                config,
+            ));
+        }
     }
 
     episodes
@@ -763,8 +767,8 @@ fn finalize_episode_from_buckets<P: Clone + Eq + std::hash::Hash + std::fmt::Deb
 ) -> ProductiveEpisode<P, String> {
     buckets.sort_by_key(|b| b.bucket_start.0);
 
-    let started_at = buckets.first().unwrap().bucket_start;
-    let ended_at = buckets.last().unwrap().bucket_end;
+    let started_at = buckets[0].bucket_start;
+    let ended_at = buckets[buckets.len() - 1].bucket_end;
     let credited_seconds: u64 = buckets.iter().map(|b| b.credited_seconds).sum();
     let valid = credited_seconds > 0;
 
@@ -911,6 +915,7 @@ pub fn score(input: ScoreInput) -> ScoreExplanation {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     use hackai_schema::{
