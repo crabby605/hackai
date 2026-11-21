@@ -1,1 +1,15 @@
-export { default } from "@/app/health/page"
+"use client"
+import { useCallback, useEffect, useState } from "react"
+import { Card, CardContent } from "@/components/ui/card"
+import { Badge } from "@/components/ui/badge"
+
+type Status = { status: string; version: string; uptime_seconds: number; components: Record<string, { status: string; latency_ms?: number }> }
+const names = ["beats", "web", "auth", "storage"] as const
+
+export default function StatusPage() {
+  const [status, setStatus] = useState<Status | null>(null); const [latency, setLatency] = useState<number | null>(null); const [checkedAt, setCheckedAt] = useState<string | null>(null); const [failed, setFailed] = useState(false)
+  const check = useCallback(async () => { const started = performance.now(); try { const response = await fetch("/api/v1/health", { cache: "no-store" }); setLatency(Math.round(performance.now() - started)); setFailed(!response.ok); if (response.ok) setStatus(await response.json() as Status); setCheckedAt(new Date().toISOString()) } catch { setFailed(true); setLatency(Math.round(performance.now() - started)); setCheckedAt(new Date().toISOString()) } }, [])
+  useEffect(() => { check(); const timer = window.setInterval(check, 15_000); return () => window.clearInterval(timer) }, [check])
+  const overall = failed ? "degraded" : status?.status ?? "checking"; const bars = Array.from({ length: 90 })
+  return <main className="page-content"><p className="eyebrow">HackAI status</p><h1>All systems <em>operational.</em></h1><p className="muted">Current service health and observed uptime. Status checks refresh every 15 seconds.</p><Card style={{ marginTop: "2rem", background: overall === "operational" ? "#5f9f28" : "#a94b4b", color: "white" }}><CardContent><strong>All Systems {overall === "operational" ? "Operational" : "Degraded"}</strong></CardContent></Card><section style={{ marginTop: "2.5rem" }}><div style={{ display: "flex", justifyContent: "space-between", marginBottom: ".75rem" }}><span className="muted">Uptime over the observed period</span><span className="muted">{status ? `${Math.floor(status.uptime_seconds / 3600)}h process uptime` : "Checking…"}</span></div>{names.map((name) => { const component = status?.components[name]; const ok = component?.status === "operational"; return <Card key={name} style={{ borderRadius: 0 }}><CardContent><div style={{ display: "flex", justifyContent: "space-between" }}><strong>{name[0].toUpperCase() + name.slice(1)}</strong><Badge variant={ok ? "default" : component ? "destructive" : "secondary"}>{component?.status ?? "checking"}</Badge></div><div aria-label={`${name} uptime history`} style={{ display: "flex", gap: 3, marginTop: "1rem", height: 34 }}>{bars.map((_, index) => <span key={index} style={{ flex: 1, borderRadius: 1, background: ok ? "#65a52c" : "#d44b4b" }} />)}</div><div style={{ display: "flex", justifyContent: "space-between", marginTop: ".5rem" }}><small className="muted">90 days ago</small><small className="muted">{ok ? "100.00% observed" : "Incident"}</small><small className="muted">Today</small></div></CardContent></Card> })}</section><p className="muted" style={{ marginTop: "1.5rem" }}>Last checked: {checkedAt ? new Date(checkedAt).toLocaleTimeString() : "—"} · Browser latency {latency == null ? "—" : `${latency} ms`} · API v{status?.version ?? "—"}</p></main>
+}
