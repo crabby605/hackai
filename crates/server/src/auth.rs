@@ -327,6 +327,14 @@ pub fn clear_session_cookie(is_https: bool, domain: Option<&str>) -> HeaderMap {
     headers
 }
 
+fn clear_oidc_state_cookie(is_https: bool) -> HeaderValue {
+    let secure_flag = if is_https { "; Secure" } else { "" };
+    HeaderValue::from_str(&format!(
+        "{OIDC_STATE_COOKIE}=; Path=/; HttpOnly{secure_flag}; SameSite=Lax; Max-Age=0"
+    ))
+    .unwrap_or_else(|_| HeaderValue::from_static(""))
+}
+
 /// Extract and verify current user `sub` from the session cookie.
 /// When OIDC is configured, verifies the RS256 ID token and extracts `sub`.
 /// Returns None for banned users.
@@ -492,6 +500,16 @@ async fn login(
     let value = HeaderValue::from_str(&cookie)
         .map_err(|e| AuthError::InvalidToken(format!("state cookie: {e}")))?;
     response.headers_mut().insert(header::SET_COOKIE, value);
+    // Starting a fresh OIDC flow must discard any stale provider or HackAI
+    // session cookie; otherwise the browser can keep retrying the same expired
+    // identity while the callback is trying to establish a new session.
+    response.headers_mut().append(
+        header::SET_COOKIE,
+        clear_session_cookie(is_https, state.session_cookie_domain.as_deref())
+            .get(header::SET_COOKIE)
+            .cloned()
+            .ok_or_else(|| AuthError::InvalidToken("clear session cookie".into()))?,
+    );
     Ok(response)
 }
 
@@ -591,6 +609,9 @@ async fn callback(
         is_https,
         app.auth.session_cookie_domain.as_deref(),
     ));
+    response
+        .headers_mut()
+        .append(header::SET_COOKIE, clear_oidc_state_cookie(is_https));
     Ok(response)
 }
 
