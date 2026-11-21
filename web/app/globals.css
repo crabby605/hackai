@@ -121,6 +121,13 @@ body, .app-shell { background: var(--bg); }
 .admin-search-row { display: grid; grid-template-columns: auto minmax(12rem, 24rem) 1fr; gap: .75rem; align-items: center; margin: 0 0 1rem; }.admin-search-label { color: var(--muted); font-size: .8rem; font-weight: 700; }.admin-search { min-width: 0; padding: .65rem .8rem; border: 1px solid var(--line-strong); border-radius: .35rem; color: var(--ink); background: var(--panel); font: .85rem ui-sans-serif, system-ui, sans-serif; }.admin-search:focus { border-color: #f5f5f5; outline: 0; box-shadow: 0 0 0 3px #ffffff1f; }.admin-search-count { color: var(--muted); font-size: .75rem; text-align: right; }.admin-empty { padding: 2rem !important; color: var(--muted); text-align: center; }
 @media (max-width: 520px) { .admin-search-row { grid-template-columns: 1fr; }.admin-search-count { text-align: left; } }
 
+/* Public, auth, and pairing states are standalone and centered even when an
+   old session cookie is still present in the browser. */
+.state-card { width: min(100% - 2rem, 620px); margin-inline: auto; }
+.settings-api-key { margin-top: 1rem; }
+.api-key-row { display: flex; align-items: center; flex-wrap: wrap; gap: .65rem; }
+.api-key-row code { min-width: 12rem; padding: .7rem .8rem; color: var(--ink); border: 1px solid var(--line-strong); background: var(--panel-raised); letter-spacing: .04em; }
+
 /* The workspace has one persistent navigation surface: the sidebar. */
 .app-shell { grid-template-rows: minmax(0, 1fr); }
 .sidebar { grid-row: 1; height: 100vh; }

@@ -136,6 +136,9 @@ enum Command {
     Login {
         #[arg(help = "API token to store locally; omitted opens browser pairing")]
         token: Option<String>,
+        /// Explicit API-key form (also accepts HACKAI_API_KEY).
+        #[arg(long, conflicts_with = "token")]
+        api_key: Option<String>,
         /// Kept for backwards compatibility; browser pairing is now the default
         #[arg(long)]
         device: bool,
@@ -424,10 +427,13 @@ fn cmd_export(preview: bool) -> io::Result<()> {
     Ok(())
 }
 
-fn cmd_login(token: Option<String>, _device: bool) -> io::Result<()> {
+fn cmd_login(token: Option<String>, api_key: Option<String>, _device: bool) -> io::Result<()> {
     let r = state::root(Path::new("."))?;
 
-    if let Some(token) = token {
+    if let Some(token) = api_key
+        .or(token)
+        .or_else(|| std::env::var("HACKAI_API_KEY").ok())
+    {
         let token = token.trim();
         if token.is_empty() {
             return Err(io::Error::new(
@@ -479,26 +485,65 @@ fn cmd_login(token: Option<String>, _device: bool) -> io::Result<()> {
     } else {
         "xdg-open"
     };
-    println!("\nPress Enter to open the authorization page in your browser (or Ctrl-C to cancel).");
-    let mut open_browser = String::new();
-    io::stdin().read_line(&mut open_browser)?;
-    let _ = std::process::Command::new(opener)
-        .arg(verification_uri)
-        .spawn();
-
-    println!("\nWaiting for authorization...");
     let start = std::time::Instant::now();
     let timeout = std::time::Duration::from_secs(expires_in);
-
-    loop {
-        if start.elapsed() > timeout {
-            return Err(io::Error::new(
-                io::ErrorKind::TimedOut,
-                "authorization timed out",
-            ));
+    let (status_tx, status_rx) = std::sync::mpsc::channel::<io::Result<Value>>();
+    let poll_server = server_url.clone();
+    let poll_device = device_code.to_string();
+    std::thread::spawn(move || {
+        let poll_rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build();
+        let Ok(poll_rt) = poll_rt else { return };
+        loop {
+            if let Ok(value) =
+                poll_rt.block_on(api::api_cli_pair_status(&poll_server, &poll_device))
+            {
+                let status = value
+                    .get("status")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("pending");
+                if status != "pending" {
+                    let _ = status_tx.send(Ok(value));
+                    return;
+                }
+            }
+            if start.elapsed() > timeout {
+                let _ = status_tx.send(Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "authorization timed out",
+                )));
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_secs(2));
         }
-        std::thread::sleep(std::time::Duration::from_secs(2));
-        let status = rt.block_on(api::api_cli_pair_status(&server_url, device_code))?;
+    });
+    let (input_tx, input_rx) = std::sync::mpsc::channel::<String>();
+    std::thread::spawn(move || {
+        let mut input = String::new();
+        if io::stdin().read_line(&mut input).is_ok() {
+            let _ = input_tx.send(input);
+        }
+    });
+    println!(
+        "\nPress Enter to open the authorization page in your browser (or paste the URL yourself)."
+    );
+    println!("Waiting for authorization...");
+    loop {
+        if let Ok(input) = input_rx.try_recv() {
+            let _ = input;
+            let _ = std::process::Command::new(opener)
+                .arg(verification_uri)
+                .spawn();
+            println!("Authorization page opened.");
+        }
+        let status = match status_rx.recv_timeout(std::time::Duration::from_millis(100)) {
+            Ok(result) => result?,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                return Err(io::Error::other("authorization polling stopped"));
+            }
+        };
         let status_str = status
             .get("status")
             .and_then(|v| v.as_str())
@@ -1112,7 +1157,11 @@ fn main() -> io::Result<()> {
         Command::Status { repo } => cmd_status(&repo)?,
         Command::Audit { repo } => cmd_audit(&repo)?,
         Command::Export { preview } => cmd_export(preview)?,
-        Command::Login { token, device } => cmd_login(token, device)?,
+        Command::Login {
+            token,
+            api_key,
+            device,
+        } => cmd_login(token, api_key, device)?,
         Command::Logout => cmd_logout()?,
         Command::Whoami => cmd_whoami()?,
         Command::Sync { repo, force } => cmd_sync(&repo, force)?,

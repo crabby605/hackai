@@ -23,7 +23,7 @@ use uuid::Uuid;
 
 use crate::AppState;
 
-const PAIRING_TTL_SECS: i64 = 600;
+const PAIRING_TTL_SECS: i64 = 1800;
 const USER_CODE_LEN: usize = 8;
 const ALPHABET: &[u8] = b"ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 
@@ -32,6 +32,7 @@ pub fn routes() -> axum::Router<AppState> {
         .route("/api/v1/cli/pairings", post(create_pairing))
         .route("/api/v1/cli/pairings/complete", post(complete_pairing))
         .route("/api/v1/cli/pairings/{code}", get(pairing_status))
+        .route("/api/v1/me/api-key", get(api_key).post(rotate_api_key))
 }
 
 #[derive(Deserialize)]
@@ -46,13 +47,14 @@ fn now_secs() -> i64 {
         .unwrap_or_default()
 }
 
-fn issue_token() -> (String, Vec<u8>) {
+pub(crate) fn issue_token() -> (String, Vec<u8>) {
     let mut hasher = Sha256::new();
     hasher.update(Uuid::new_v4().to_string().as_bytes());
     hasher.update(now_secs().to_string().as_bytes());
     let digest = hasher.finalize();
     let token = format!("hak_{}", base64_engine.encode(digest.as_slice()));
-    (token, digest.as_slice().to_vec())
+    let token_hash = Sha256::digest(token.as_bytes());
+    (token, token_hash.as_slice().to_vec())
 }
 
 /// Short, unambiguous user code derived from the device code (no rand dependency).
@@ -110,6 +112,22 @@ async fn complete_pairing(
     let code = body.code.trim();
     if code.is_empty() {
         return Err(StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    // A refresh or double-click after approval is harmless. Never mint a second
+    // installation key for the same device authorization.
+    if let Some(existing) = sqlx::query(
+        "SELECT status FROM cli_pairings WHERE user_code = $1 AND status IN ('approved', 'consumed')",
+    )
+    .bind(code)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+    {
+        let status: String = existing
+            .try_get("status")
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        return Ok(Json(serde_json::json!({ "status": status })));
     }
 
     let (token, token_hash) = issue_token();
@@ -180,4 +198,79 @@ async fn pairing_status(
         .try_get("status")
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     Ok(Json(serde_json::json!({ "status": status })))
+}
+
+fn mask_token(token: &str) -> String {
+    let tail: String = token
+        .chars()
+        .rev()
+        .take(10)
+        .collect::<String>()
+        .chars()
+        .rev()
+        .collect();
+    format!("••••••••••{tail}")
+}
+
+/// Return only whether a key exists and its final ten characters. Plaintext is
+/// never recoverable from the server.
+async fn api_key(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let sub = crate::auth::extract_current_user(&state.auth, &state.db, &headers)
+        .await
+        .ok_or(StatusCode::UNAUTHORIZED)?;
+    let row = sqlx::query(
+        "SELECT k.created_at FROM api_keys k JOIN users u ON u.id = k.user_id
+         WHERE u.auth_subject = $1 AND k.revoked_at IS NULL
+         ORDER BY k.created_at DESC LIMIT 1",
+    )
+    .bind(&sub)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(Json(serde_json::json!({
+        "has_key": row.is_some(),
+        "masked": if row.is_some() { "••••••••••" } else { "" },
+    })))
+}
+
+/// Revoke all active keys and return one new plaintext key exactly once.
+async fn rotate_api_key(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let sub = crate::auth::extract_current_user(&state.auth, &state.db, &headers)
+        .await
+        .ok_or(StatusCode::UNAUTHORIZED)?;
+    let user_id: i64 = sqlx::query_scalar("SELECT id FROM users WHERE auth_subject = $1")
+        .bind(&sub)
+        .fetch_optional(&state.db)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .ok_or(StatusCode::UNAUTHORIZED)?;
+    let (token, token_hash) = issue_token();
+    let mut tx = state
+        .db
+        .begin()
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    sqlx::query("UPDATE api_keys SET revoked_at = now() WHERE user_id = $1 AND revoked_at IS NULL")
+        .bind(user_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    sqlx::query("INSERT INTO api_keys (user_id, token_hash) VALUES ($1, $2)")
+        .bind(user_id)
+        .bind(token_hash.as_slice())
+        .execute(&mut *tx)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    tx.commit()
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(Json(
+        serde_json::json!({ "api_key": token, "masked": mask_token(&token) }),
+    ))
 }

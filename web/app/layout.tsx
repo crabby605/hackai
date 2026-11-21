@@ -43,7 +43,9 @@ export default async function RootLayout({ children }: { children: React.ReactNo
 
   // Public marketing and auth pages should not inherit the workspace chrome.
   // The sidebar is only meaningful once a session exists.
-  if (!cookie) {
+  // A stale/invalid cookie must not expose workspace navigation on public or
+  // auth pages. Only a verified API viewer gets the sidebar.
+  if (!cookie || !viewer) {
     return (
       <html lang="en" className={cn("dark font-sans")}>
         <body>{children}</body>
