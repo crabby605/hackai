@@ -46,6 +46,9 @@ pub struct SyncRequest {
     /// Privacy-preserving prompt classifications; raw prompt text is rejected.
     #[serde(default)]
     pub prompt_events: Vec<LocalPromptEvent>,
+    /// Daily aggregate prompt metrics; raw prompts are never accepted.
+    #[serde(default)]
+    pub prompt_metrics: Vec<LocalPromptMetric>,
 }
 
 #[derive(Deserialize, Clone)]
@@ -104,6 +107,14 @@ pub struct LocalPromptEvent {
     pub signals: serde_json::Value,
 }
 
+#[derive(Deserialize, Clone)]
+pub struct LocalPromptMetric {
+    pub day_start_unix: i64,
+    pub prompt_count: i64,
+    pub proficiency_sum_permille: i64,
+    pub slop_sum_permille: i64,
+}
+
 fn unknown_harness() -> String {
     "unknown".to_owned()
 }
@@ -120,6 +131,7 @@ pub struct SyncResponse {
     pub checkpoints_synced: i64,
     pub episodes_synced: i64,
     pub prompt_events_synced: i64,
+    pub prompt_metrics_synced: i64,
     pub tampered_request: bool,
     pub github_url: Option<String>,
 }
@@ -247,6 +259,7 @@ async fn sync(
                 checkpoints_synced: 0,
                 episodes_synced: 0,
                 prompt_events_synced: 0,
+                prompt_metrics_synced: 0,
                 tampered_request,
                 github_url: github_url.map(|(o, n)| format!("https://github.com/{}/{}", o, n)),
             }));
@@ -383,6 +396,28 @@ async fn sync(
         }
     }
 
+    let mut prompt_metrics_synced = 0;
+    for metric in &req.prompt_metrics {
+        if metric.day_start_unix < 0
+            || metric.prompt_count <= 0
+            || metric.proficiency_sum_permille < 0
+            || metric.slop_sum_permille < 0
+            || metric.proficiency_sum_permille > metric.prompt_count * 1000
+            || metric.slop_sum_permille > metric.prompt_count * 1000
+        {
+            continue;
+        }
+        let stored = sqlx::query(
+            "INSERT INTO prompt_metrics (user_id, project_id, day_start, prompt_count, proficiency_sum_permille, slop_sum_permille) VALUES ($1, $2, to_timestamp($3), $4, $5, $6) ON CONFLICT (user_id, project_id, day_start) DO UPDATE SET prompt_count = EXCLUDED.prompt_count, proficiency_sum_permille = EXCLUDED.proficiency_sum_permille, slop_sum_permille = EXCLUDED.slop_sum_permille",
+        )
+        .bind(user_id).bind(project_id).bind(metric.day_start_unix)
+        .bind(metric.prompt_count).bind(metric.proficiency_sum_permille).bind(metric.slop_sum_permille)
+        .execute(&state.db).await;
+        if stored.is_ok() {
+            prompt_metrics_synced += 1;
+        }
+    }
+
     Ok(Json(SyncResponse {
         status: "synced",
         project_id,
@@ -391,6 +426,7 @@ async fn sync(
         checkpoints_synced,
         episodes_synced,
         prompt_events_synced,
+        prompt_metrics_synced,
         tampered_request,
         github_url: github_url.map(|(o, n)| format!("https://github.com/{}/{}", o, n)),
     }))

@@ -119,8 +119,10 @@ enum Command {
         #[arg(long)]
         force: bool,
     },
+    #[cfg(feature = "dev-tools")]
     Explain,
     /// Analyze a Claude JSONL transcript into privacy-preserving struggle episodes.
+    #[cfg(feature = "dev-tools")]
     Episodes {
         #[arg(default_value = ".")]
         repo: PathBuf,
@@ -159,8 +161,10 @@ enum Command {
     /// Run the local stdio MCP server for advisory annotations.
     Mcp,
     /// Classify prompt tone locally from standard input; the prompt is never stored or synced.
+    #[cfg(feature = "dev-tools")]
     ClassifyPrompt,
     /// Train a local prompt-clarity model from consented JSONL examples.
+    #[cfg(feature = "dev-tools")]
     TrainPromptModel {
         #[arg(long, default_value = "ml/prompt_clarity_seed.jsonl")]
         dataset: PathBuf,
@@ -168,6 +172,7 @@ enum Command {
         output: PathBuf,
     },
     /// Generate a varied, clearly-marked synthetic prompt dataset locally.
+    #[cfg(feature = "dev-tools")]
     GeneratePromptDataset {
         #[arg(long, default_value = "ml/prompt_clarity_synthetic_v2.jsonl")]
         output: PathBuf,
@@ -176,6 +181,7 @@ enum Command {
         per_level: usize,
     },
     /// Classify one pasted prompt and save it locally for future model tuning.
+    #[cfg(feature = "dev-tools")]
     PromptLab {
         /// Local-only JSONL file. This default is ignored by Git.
         #[arg(long, default_value = "ml/prompt-lab.local.jsonl")]
@@ -298,6 +304,7 @@ fn cmd_track(repo: &Path, local_only: bool, dashboard: bool) -> io::Result<()> {
                 .unwrap();
             let _ = rt.block_on(async {
                 let payload = api::build_sync_payload(&r).unwrap_or_else(|_| api::SyncPayload {
+                    batch_id: Some(uuid::Uuid::new_v4().to_string()),
                     annotation_policy_sha256: String::new(),
                     cli_release_sha256: String::new(),
                     adapter_sha256: std::collections::BTreeMap::new(),
@@ -1106,7 +1113,9 @@ fn main() -> io::Result<()> {
         Command::Logout => cmd_logout()?,
         Command::Whoami => cmd_whoami()?,
         Command::Sync { repo, force } => cmd_sync(&repo, force)?,
+        #[cfg(feature = "dev-tools")]
         Command::Explain => cmd_explain(),
+        #[cfg(feature = "dev-tools")]
         Command::Episodes {
             repo,
             transcript,
@@ -1121,11 +1130,15 @@ fn main() -> io::Result<()> {
             chapter_title,
         } => cmd_annotate(&repo, window, label, user_role, evidence, chapter_title)?,
         Command::Mcp => cmd_mcp()?,
+        #[cfg(feature = "dev-tools")]
         Command::ClassifyPrompt => cmd_classify_prompt()?,
+        #[cfg(feature = "dev-tools")]
         Command::TrainPromptModel { dataset, output } => cmd_train_prompt_model(dataset, output)?,
+        #[cfg(feature = "dev-tools")]
         Command::GeneratePromptDataset { output, per_level } => {
             cmd_generate_prompt_dataset(output, per_level)?
         }
+        #[cfg(feature = "dev-tools")]
         Command::PromptLab {
             log,
             proficiency_label,

@@ -12,6 +12,9 @@ use std::time::Duration;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SyncPayload {
+    /// Stable id for this queued batch; retries are idempotent on the server.
+    #[serde(default)]
+    pub batch_id: Option<String>,
     /// SHA-256 of the locally installed, agent-readable annotation policy.
     pub annotation_policy_sha256: String,
     /// SHA-256 of the running HackAI release, verified against the server's
@@ -40,6 +43,7 @@ pub fn build_sync_payload(repo_root: &Path) -> io::Result<SyncPayload> {
     let prompt_events = read_prompt_events(repo_root);
 
     Ok(SyncPayload {
+        batch_id: Some(uuid::Uuid::new_v4().to_string()),
         annotation_policy_sha256: annotation_policy_sha256()?,
         cli_release_sha256: cli_release_sha256()?,
         adapter_sha256: adapter_sha256(repo_root),

@@ -106,6 +106,21 @@ pub struct AdminBody {
     pub is_admin: bool,
 }
 
+#[derive(Serialize)]
+pub struct AdminInsights {
+    pub users: i64,
+    pub public_profiles: i64,
+    pub projects: i64,
+    pub episodes: i64,
+    pub credited_seconds: i64,
+    pub active_installations: i64,
+    pub active_users_7d: i64,
+    pub resolution_rate_permille: i64,
+    pub failed_batches: i64,
+    pub harnesses: Vec<serde_json::Value>,
+    pub projects_list: Vec<serde_json::Value>,
+}
+
 pub fn routes() -> axum::Router<AppState> {
     axum::Router::new()
         .route("/api/v1/admin/sessions", get(list_sessions))
@@ -113,6 +128,7 @@ pub fn routes() -> axum::Router<AppState> {
         .route("/api/v1/admin/users/{id}/admin", post(set_admin))
         .route("/api/v1/admin/users/{id}/projects", get(user_projects))
         .route("/api/v1/admin/activity", get(list_activity))
+        .route("/api/v1/admin/insights", get(insights))
         .route(
             "/api/v1/admin/harness-integrity",
             get(list_harness_integrity),
@@ -120,6 +136,82 @@ pub fn routes() -> axum::Router<AppState> {
         .route("/api/v1/admin/users/{id}/ban", post(ban_user))
         .route("/api/v1/admin/users/{id}/unban", post(unban_user))
         .route("/api/v1/admin/users/{id}/cooldown", post(set_cooldown))
+}
+
+async fn insights(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<AdminInsights>, StatusCode> {
+    let _ = require_admin(&state, &headers).await?;
+    let users: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM users")
+        .fetch_one(&state.db)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let public_profiles: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM users WHERE profile_public = TRUE")
+            .fetch_one(&state.db)
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let projects: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM projects WHERE deleted_at IS NULL")
+            .fetch_one(&state.db)
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let episodes: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM productive_episodes")
+        .fetch_one(&state.db)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let credited_seconds: i64 = sqlx::query_scalar(
+        "SELECT COALESCE(SUM(credited_seconds), 0)::BIGINT FROM productive_episodes",
+    )
+    .fetch_one(&state.db)
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let active_installations: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM api_keys WHERE revoked_at IS NULL")
+            .fetch_one(&state.db)
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let active_users_7d: i64 = sqlx::query_scalar("SELECT COUNT(DISTINCT user_id) FROM productive_episodes WHERE started_at >= now() - interval '7 days'")
+        .fetch_one(&state.db).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let resolved: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM productive_episodes WHERE resolved")
+            .fetch_one(&state.db)
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let resolution_rate_permille = if episodes > 0 {
+        resolved * 1000 / episodes
+    } else {
+        0
+    };
+    let failed_batches: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM tampered_sync_requests")
+        .fetch_one(&state.db)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let harness_rows = sqlx::query("SELECT harness, COUNT(*)::BIGINT AS sessions FROM prompt_events GROUP BY harness ORDER BY sessions DESC")
+        .fetch_all(&state.db).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let harnesses = harness_rows
+        .into_iter()
+        .map(|row| {
+            serde_json::json!({
+                "harness": row.try_get::<String, _>("harness").unwrap_or_else(|_| "unknown".into()),
+                "sessions": row.try_get::<i64, _>("sessions").unwrap_or(0),
+            })
+        })
+        .collect();
+    Ok(Json(AdminInsights {
+        users,
+        public_profiles,
+        projects,
+        episodes,
+        credited_seconds,
+        active_installations,
+        active_users_7d,
+        resolution_rate_permille,
+        failed_batches,
+        harnesses,
+        projects_list: Vec::new(),
+    }))
 }
 
 async fn list_harness_integrity(

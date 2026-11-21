@@ -61,11 +61,11 @@ jobs:
 
       - name: Build
         if: matrix.cross != 'true'
-        run: cargo build --release --bin hackai --target ${{ matrix.target }}
+        run: cargo build --release --no-default-features --bin hackai --target ${{ matrix.target }}
 
       - name: Cross build
         if: matrix.cross == 'true'
-        run: cross build --release --bin hackai --target ${{ matrix.target }}
+        run: cross build --release --no-default-features --bin hackai --target ${{ matrix.target }}
 
       - name: Package (Unix)
         if: matrix.os != 'windows-latest'
