@@ -199,6 +199,18 @@ async fn insights(
             })
         })
         .collect();
+    let project_rows = sqlx::query("SELECT p.id, p.name, p.owner_id, u.username, u.display_name, COUNT(e.id)::BIGINT AS episodes, COALESCE(SUM(e.credited_seconds), 0)::BIGINT AS credited_seconds, EXTRACT(EPOCH FROM MAX(e.ended_at))::BIGINT * 1000 AS last_active FROM projects p JOIN users u ON u.id = p.owner_id LEFT JOIN productive_episodes e ON e.project_id = p.id WHERE p.deleted_at IS NULL GROUP BY p.id, u.username, u.display_name ORDER BY MAX(e.ended_at) DESC NULLS LAST LIMIT 100")
+        .fetch_all(&state.db).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let projects_list = project_rows.into_iter().map(|row| serde_json::json!({
+        "id": row.try_get::<i64, _>("id").unwrap_or_default().to_string(),
+        "name": row.try_get::<String, _>("name").unwrap_or_else(|_| "local-project".into()),
+        "owner_id": row.try_get::<i64, _>("owner_id").unwrap_or_default().to_string(),
+        "username": row.try_get::<String, _>("username").unwrap_or_else(|_| "unknown".into()),
+        "display_name": row.try_get::<Option<String>, _>("display_name").unwrap_or(None),
+        "episodes": row.try_get::<i64, _>("episodes").unwrap_or(0),
+        "credited_seconds": row.try_get::<i64, _>("credited_seconds").unwrap_or(0),
+        "last_active": row.try_get::<Option<i64>, _>("last_active").unwrap_or(None),
+    })).collect();
     Ok(Json(AdminInsights {
         users,
         public_profiles,
@@ -210,7 +222,7 @@ async fn insights(
         resolution_rate_permille,
         failed_batches,
         harnesses,
-        projects_list: Vec::new(),
+        projects_list,
     }))
 }
 
