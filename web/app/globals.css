@@ -130,6 +130,7 @@ em { font-style: normal; font-family: inherit; }
 .settings-api-key { margin-top: 1rem; }
 .api-key-row { display: flex; align-items: center; flex-wrap: wrap; gap: .65rem; }
 .api-key-row code { min-width: 12rem; padding: .7rem .8rem; color: var(--ink); border: 1px solid var(--line-strong); background: var(--panel-raised); letter-spacing: .04em; }
+.login-expired { margin-top: 1rem !important; color: var(--ink) !important; font-weight: 700; }
 
 /* The workspace has one persistent navigation surface: the sidebar. */
 .app-shell { grid-template-rows: minmax(0, 1fr); }

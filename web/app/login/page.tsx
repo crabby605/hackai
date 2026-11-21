@@ -2,6 +2,7 @@ import { cookies } from "next/headers"
 import { redirect } from "next/navigation"
 import { Button } from "@/components/ui/button"
 import { getJson } from "@/app/lib/api"
+import ExpiredRedirect from "./expired-redirect"
 
 function localPath(value: string | undefined): string {
   if (!value || !value.startsWith("/") || value.includes("\\") || /%2f|%5c/i.test(value)) return "/"
@@ -14,13 +15,14 @@ function localPath(value: string | undefined): string {
 export default async function LoginPage({
   searchParams,
 }: {
-  searchParams: Promise<{ and?: string; error?: string; utm_source?: string; utm_medium?: string }>
+    searchParams: Promise<{ and?: string; error?: string; expired?: string; utm_source?: string; utm_medium?: string }>
 }) {
-  const { and, error, utm_source, utm_medium } = await searchParams
+  const { and, error, expired, utm_source, utm_medium } = await searchParams
   const continuePath = localPath(and)
   const cookieStore = await cookies()
   const cookie = cookieStore.get("hackai_session")?.value
   const viewer = cookie ? await getJson<{ username: string }>("/api/v1/me") : null
+  const sessionExpired = expired === "1" || Boolean(cookie && !viewer)
 
   // A stale cookie must not bounce the user back to the page that sent them
   // here. Only a verified session is already signed in.
@@ -42,6 +44,7 @@ export default async function LoginPage({
       >
         Continue <span>→</span>
       </Button>
+      {sessionExpired && <ExpiredRedirect continueUrl={continueUrl} />}
       {error && <p style={{ color: "var(--danger)", fontSize: "0.8rem", marginTop: "1rem" }}>
         Sign-in did not complete. Reference: <code>{error}</code>{utm_source && utm_medium ? ` (${utm_source}/${utm_medium})` : ""}.
       </p>}

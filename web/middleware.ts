@@ -12,6 +12,7 @@ export function middleware(request: NextRequest) {
   if (needsSession && (!session || expired)) {
     const destination = new URL("/login", request.url)
     destination.searchParams.set("and", `${request.nextUrl.pathname}${request.nextUrl.search}`)
+    if (expired) destination.searchParams.set("expired", "1")
     const response = NextResponse.redirect(destination)
     if (expired) response.cookies.delete("hackai_session")
     return response
