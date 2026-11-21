@@ -254,6 +254,22 @@ pub fn session_cookie(id_token: &str, is_https: bool, domain: Option<&str>) -> H
     headers
 }
 
+pub fn client_ip(headers: &HeaderMap) -> String {
+    headers
+        .get("x-forwarded-for")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.split(',').next())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .or_else(|| {
+            headers
+                .get("x-real-ip")
+                .and_then(|value| value.to_str().ok())
+        })
+        .unwrap_or("unknown")
+        .to_owned()
+}
+
 #[allow(dead_code)]
 pub fn clear_session_cookie(is_https: bool, domain: Option<&str>) -> HeaderMap {
     let mut headers = HeaderMap::new();
@@ -318,6 +334,25 @@ pub async fn extract_current_user(
                 return None;
             }
         };
+        let token_hash = Sha256::digest(raw_val.as_bytes());
+        let ip = client_ip(headers);
+        let binding = sqlx::query_scalar::<_, String>(
+            "SELECT client_ip FROM session_ip_bindings WHERE token_hash = $1",
+        )
+        .bind(token_hash.as_slice())
+        .fetch_optional(db)
+        .await
+        .ok()
+        .flatten();
+        if binding.as_deref().is_some_and(|bound| bound != ip) {
+            return None;
+        }
+        let _ = sqlx::query(
+            "UPDATE session_ip_bindings SET last_seen_at = now() WHERE token_hash = $1",
+        )
+        .bind(token_hash.as_slice())
+        .execute(db)
+        .await;
         // Reject banned users.
         if is_user_banned(db, &sub).await {
             return None;
@@ -490,6 +525,17 @@ async fn callback(
     .execute(&app.db)
     .await
     .map_err(|e| AuthError::Upstream(format!("user provision: {e}")))?;
+
+    let token_hash = Sha256::digest(id_token.as_bytes());
+    sqlx::query(
+        "INSERT INTO session_ip_bindings (token_hash, client_ip) VALUES ($1, $2) \
+         ON CONFLICT (token_hash) DO UPDATE SET client_ip = EXCLUDED.client_ip, last_seen_at = now()",
+    )
+    .bind(token_hash.as_slice())
+    .bind(client_ip(&headers))
+    .execute(&app.db)
+    .await
+    .map_err(|e| AuthError::Upstream(format!("session binding: {e}")))?;
 
     let is_https = app.auth.redirect_uri.starts_with("https://");
     let mut response = Redirect::to(continue_path).into_response();

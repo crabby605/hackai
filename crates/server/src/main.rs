@@ -14,14 +14,17 @@ mod sync;
 use axum::{
     BoxError, Json, Router,
     error_handling::HandleErrorLayer,
-    extract::{DefaultBodyLimit, Path, State},
+    extract::{DefaultBodyLimit, Path, Request, State},
     http::{HeaderMap, HeaderName, StatusCode},
+    middleware,
+    response::{IntoResponse, Response},
     routing::{delete, get, post},
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use sqlx::{PgPool, Row};
-use std::sync::{Arc, OnceLock};
+use std::collections::{HashMap, VecDeque};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 use std::time::Instant;
 use tokio::sync::RwLock;
@@ -41,6 +44,45 @@ pub struct AppState {
     pub db: PgPool,
     pub sse_hub: sse::SseHub,
     pub username_bloom: Arc<RwLock<UsernameBloom>>,
+    pub ip_rate_limits: Arc<Mutex<HashMap<String, VecDeque<Instant>>>>,
+}
+
+async fn per_ip_rate_limit(
+    State(state): State<AppState>,
+    request: Request,
+    next: middleware::Next,
+) -> Response {
+    let ip = auth::client_ip(request.headers());
+    let now = Instant::now();
+    let allowed = state
+        .ip_rate_limits
+        .lock()
+        .ok()
+        .map(|mut limits| {
+            let calls = limits.entry(ip).or_default();
+            while calls
+                .front()
+                .is_some_and(|seen| now.duration_since(*seen).as_secs_f32() >= 1.0)
+            {
+                calls.pop_front();
+            }
+            if calls.len() >= 5 {
+                false
+            } else {
+                calls.push_back(now);
+                true
+            }
+        })
+        .unwrap_or(true);
+    if !allowed {
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            [("retry-after", "1")],
+            "rate limit exceeded",
+        )
+            .into_response();
+    }
+    next.run(request).await
 }
 
 const USERNAME_BLOOM_BITS: usize = 32_768;
@@ -390,9 +432,10 @@ async fn projects_list(
     let sub = auth::extract_current_user(&state.auth, &state.db, &headers)
         .await
         .ok_or(StatusCode::UNAUTHORIZED)?;
-    let user_id = get_user_id(&state.db, &sub)
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let user_id = get_user_id(&state.db, &sub).await.map_err(|error| {
+        eprintln!("projects user lookup failed: {error}");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
 
     let rows = sqlx::query(
         "SELECT p.id, p.name, \
@@ -409,7 +452,10 @@ async fn projects_list(
     .bind(user_id)
     .fetch_all(&state.db)
     .await
-    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    .map_err(|error| {
+        eprintln!("projects query failed: {error}");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
 
     let mut out = Vec::with_capacity(rows.len());
     for row in rows {
@@ -875,6 +921,7 @@ async fn main() {
         db,
         sse_hub,
         username_bloom: Arc::new(RwLock::new(username_bloom)),
+        ip_rate_limits: Arc::new(Mutex::new(HashMap::new())),
     };
 
     let request_id = HeaderName::from_static("x-request-id");
@@ -930,6 +977,10 @@ async fn main() {
         .merge(ingest::routes())
         .merge(policy::routes())
         .layer(cors)
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            per_ip_rate_limit,
+        ))
         .layer(
             ServiceBuilder::new()
                 .layer(HandleErrorLayer::new(|_: BoxError| async {
