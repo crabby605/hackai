@@ -129,7 +129,7 @@ export default function ProfileBuilder({ initialProfile }: { initialProfile: Pro
         </Card>
 
         <Card className="settings-card">
-          <CardHeader className="settings-card-heading"><div><h2>Profile visibility</h2><p>Private is the default. You decide when your profile is ready to share.</p></div></CardHeader>
+          <CardHeader className="settings-card-heading"><div><h2>Profile visibility</h2><p>Public is the default. You can make your profile private at any time.</p></div></CardHeader>
           <CardContent>
           <RadioGroup className="visibility-options" value={isPublic ? "public" : "private"} onValueChange={(value) => { setIsPublic(value === "public"); setState("idle") }} aria-label="Profile visibility">
             <label className={`visibility-option${!isPublic ? " selected" : ""}`}><RadioGroupItem value="private" /><span><b>Private</b><small>Only you can view your profile and activity.</small></span></label>

@@ -101,10 +101,16 @@ pub struct BanBody {
     pub until: Option<String>, // ISO-8601 timestamp; absent = indefinite ban
 }
 
+#[derive(Deserialize)]
+pub struct AdminBody {
+    pub is_admin: bool,
+}
+
 pub fn routes() -> axum::Router<AppState> {
     axum::Router::new()
         .route("/api/v1/admin/sessions", get(list_sessions))
         .route("/api/v1/admin/users", get(list_users))
+        .route("/api/v1/admin/users/{id}/admin", post(set_admin))
         .route("/api/v1/admin/users/{id}/projects", get(user_projects))
         .route("/api/v1/admin/activity", get(list_activity))
         .route(
@@ -190,6 +196,34 @@ async fn require_admin(state: &AppState, headers: &HeaderMap) -> Result<i64, Sta
         return Err(StatusCode::FORBIDDEN);
     }
     Ok(0) // placeholder; caller doesn't need the value
+}
+
+async fn set_admin(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+    Json(body): Json<AdminBody>,
+) -> Result<Json<AdminUser>, StatusCode> {
+    let _ = require_admin(&state, &headers).await?;
+    let row = sqlx::query(
+        "UPDATE users SET is_admin = $2 WHERE id = $1
+         RETURNING id, username, is_admin, display_name, email, slack_id, avatar_url",
+    )
+    .bind(id)
+    .bind(body.is_admin)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+    .ok_or(StatusCode::NOT_FOUND)?;
+    Ok(Json(AdminUser {
+        id: row.try_get("id").map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
+        username: row.try_get("username").map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
+        is_admin: row.try_get("is_admin").map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
+        display_name: row.try_get("display_name").ok(),
+        email: row.try_get("email").ok(),
+        slack_id: row.try_get("slack_id").ok(),
+        avatar_url: row.try_get("avatar_url").ok(),
+    }))
 }
 
 async fn ban_user(

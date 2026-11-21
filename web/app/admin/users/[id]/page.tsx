@@ -5,7 +5,6 @@ import { buttonVariants } from "@/components/ui/button"
 import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from "@/components/ui/accordion"
 import { Card, CardContent } from "@/components/ui/card"
 import { cn } from "@/lib/utils"
-import ArchiveBrowser from "@/components/archive-browser"
 
 type Me = { is_admin: boolean }
 type Project = { id: string; name: string; remote_url: string | null; episodes: number; credited_seconds: number }
@@ -115,6 +114,5 @@ export default async function AccountReview({ params }: { params: Promise<{ id: 
         </AccordionContent>
       </AccordionItem>
     })}</Accordion> : <Card><CardContent><p className="text-sm text-muted-foreground">No episodes recorded.</p></CardContent></Card>}
-    <ArchiveBrowser admin initialOwnerId={id} />
   </section>
 }

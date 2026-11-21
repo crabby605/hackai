@@ -40,7 +40,7 @@ Options:
 
 Environment variables:
     INSTALL_DIR         Installation directory (default: ~/.local/bin)
-    HACKAI_SERVER_URL   Server URL for the CLI (default: https://hackai.crabby605.workers.dev)
+    HACKAI_SERVER_URL   Server URL for the CLI (default: https://hackai.crabby605.hackclub.app)
 
 Examples:
     # Install latest release
@@ -327,7 +327,7 @@ main() {
     echo "  2. Run 'hackai login' in a git repository to authenticate with the server"
     echo "  3. Run 'hackai track' in a git repository to start tracking"
     echo
-    echo "Server URL: ${HACKAI_SERVER_URL:-https://hackai.crabby605.workers.dev}"
+    echo "Server URL: ${HACKAI_SERVER_URL:-https://hackai.crabby605.hackclub.app}"
 
     if [[ "$LOGIN" == "true" ]]; then
         if command -v git >/dev/null 2>&1 && git rev-parse --show-toplevel >/dev/null 2>&1; then

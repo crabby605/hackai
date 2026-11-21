@@ -448,6 +448,10 @@ async fn callback(
         .ok_or_else(|| AuthError::InvalidToken("missing id_token".into()))?;
     let claims = app.auth.verify_id_token(&id_token).await?;
 
+    if is_user_banned(&app.db, &claims.sub).await {
+        return Ok(Redirect::to("/banned").into_response());
+    }
+
     // Provision by stable subject. Provider presentation fields remain private
     // and are not used as authorization inputs.
     sqlx::query(

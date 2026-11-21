@@ -1,0 +1,8 @@
+[Unit]
+Description=Update HackAI from GitHub when main changes
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/hackai-auto-update

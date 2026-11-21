@@ -2,7 +2,6 @@ import { notFound } from "next/navigation"
 import { getJson } from "@/app/lib/api"
 import AccountsTable, { type Account } from "./accounts-table"
 import StorageCheck from "./storage-check"
-import ArchiveBrowser from "@/components/archive-browser"
 import { Badge } from "@/components/ui/badge"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 
@@ -50,7 +49,6 @@ export default async function AdminPage() {
     </section>
 
     <section className="mt-10"><div className="section-heading"><div><h2>Accounts</h2><p>Search an account to inspect its projects and sessions.</p></div></div><div className="mt-3"><AccountsTable accounts={accounts ?? []} /></div></section>
-    <ArchiveBrowser admin />
     <StorageCheck />
   </section>
 }
