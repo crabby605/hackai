@@ -1,0 +1,26 @@
+hackai.crabby605.hackclub.app {
+	encode gzip
+
+	handle /api/* {
+		reverse_proxy 127.0.0.1:3000
+	}
+	handle /auth/* {
+		reverse_proxy 127.0.0.1:3000
+	}
+	handle /callback {
+		reverse_proxy 127.0.0.1:3000
+	}
+	handle /cli/* {
+		reverse_proxy 127.0.0.1:3000
+	}
+	handle /healthz {
+		reverse_proxy 127.0.0.1:3000
+	}
+	handle /v1/* {
+		reverse_proxy 127.0.0.1:3000
+	}
+
+	handle {
+		reverse_proxy 127.0.0.1:3001
+	}
+}
