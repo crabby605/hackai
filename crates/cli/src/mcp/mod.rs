@@ -1,6 +1,5 @@
 // MCP stdio server
-use crate::api::build_sync_payload;
-use crate::state::{Annotation, safe_terminal, state_dir, write_annotation};
+use crate::state::write_annotation;
 use serde_json::{Value, json};
 use std::io::{self, BufRead, Write};
 use std::path::Path;
@@ -294,7 +293,7 @@ pub fn run_mcp() -> io::Result<()> {
                             stdout.flush()?;
                             continue;
                         };
-                        match serde_json::to_string(&crate::prompt_classifier::classify_prompt(
+                        match serde_json::to_string(&crate::classifier::classify_prompt(
                             prompt,
                         )) {
                             Ok(signals) => mcp_response(

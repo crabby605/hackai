@@ -1,0 +1,75 @@
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-hackai}
+      POSTGRES_USER: ${POSTGRES_USER:-hackai}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+
+  migrate:
+    build:
+      context: .
+      target: migrate
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:-hackai}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-hackai}
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: "no"
+
+  api:
+    build:
+      context: .
+      target: api
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:-hackai}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-hackai}
+      FRONTEND_URL: https://${DOMAIN:?set DOMAIN in .env}
+      HC_AUTH_CLIENT_ID: ${HC_AUTH_CLIENT_ID:-}
+      HC_AUTH_CLIENT_SECRET: ${HC_AUTH_CLIENT_SECRET:-}
+      HC_AUTH_ISSUER: ${HC_AUTH_ISSUER:-https://auth.hackclub.com}
+      HC_AUTH_REDIRECT_URI: https://${DOMAIN}/callback
+      HACKAI_PUBLIC_URL: https://${DOMAIN}
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  web:
+    build:
+      context: .
+      target: web
+      args:
+        NEXT_PUBLIC_API_URL: http://api:3000
+    depends_on:
+      api:
+        condition: service_started
+    restart: unless-stopped
+
+  caddy:
+    image: caddy:2-alpine
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      DOMAIN: ${DOMAIN:?set DOMAIN in .env}
+    volumes:
+      - ./deploy/Caddyfile.docker:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      web:
+        condition: service_started
+    restart: unless-stopped
+
+volumes:
+  postgres-data:
+  caddy-data:
+  caddy-config:

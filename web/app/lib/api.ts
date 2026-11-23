@@ -9,9 +9,9 @@ type SessionUser = {
   display_name: string | null
   avatar_url: string | null
   country_code: string | null
-  profile_public: number
-  leaderboard_opt_out: number
-  is_admin: number
+  profile_public: boolean
+  leaderboard_opt_out: boolean
+  is_admin: boolean
 }
 
 const weekdayNames = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"]
@@ -36,11 +36,12 @@ async function fetchApi<T>(path: string): Promise<T | null> {
   const session = await getCookieSession()
   if (!session) return null
 
+  const reqHeaders: Record<string, string> = {
+    Cookie: `hackai_session=${session}`,
+    "Content-Type": "application/json",
+  }
   const res = await fetch(`${API_BASE}${path}`, {
-    headers: {
-      "Cookie": `hackai_session=${session}`,
-      "Content-Type": "application/json",
-    },
+    headers: reqHeaders,
     cache: "no-store",
   })
 

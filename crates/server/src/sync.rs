@@ -49,6 +49,11 @@ pub struct SyncRequest {
     /// Daily aggregate prompt metrics; raw prompts are never accepted.
     #[serde(default)]
     pub prompt_metrics: Vec<LocalPromptMetric>,
+    /// SHA-256 digests only; raw hardware identifiers are never accepted.
+    #[serde(default)]
+    pub hardware_hashes: std::collections::BTreeMap<String, String>,
+    #[serde(default = "unknown_environment_class")]
+    pub environment_class: String,
 }
 
 #[derive(Deserialize, Clone)]
@@ -119,6 +124,47 @@ fn unknown_harness() -> String {
     "unknown".to_owned()
 }
 
+fn unknown_environment_class() -> String {
+    "unknown".to_owned()
+}
+
+fn valid_environment_class(value: &str) -> bool {
+    matches!(
+        value,
+        "physical" | "vm" | "container" | "wsl" | "cloud_dev_env" | "unknown"
+    )
+}
+
+fn safe_metadata(value: &str, max_len: usize) -> bool {
+    !value.is_empty()
+        && value.len() <= max_len
+        && !value.chars().any(|ch| {
+            ch.is_control() || matches!(ch, '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}')
+        })
+}
+
+fn contains_prompt_text(value: &serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::Object(map) => map.iter().any(|(key, value)| {
+            matches!(key.as_str(), "prompt" | "prompt_text" | "content" | "text")
+                || contains_prompt_text(value)
+        }),
+        serde_json::Value::Array(values) => values.iter().any(contains_prompt_text),
+        _ => false,
+    }
+}
+
+fn valid_hardware_hashes(values: &std::collections::BTreeMap<String, String>) -> bool {
+    values.len() <= 3
+        && values.iter().all(|(kind, hash)| {
+            matches!(kind.as_str(), "fingerprint" | "asset_tag" | "serial_number")
+                && hash.len() == 64
+                && hash
+                    .bytes()
+                    .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+        })
+}
+
 #[derive(Deserialize, Clone)]
 pub struct LocalEventId(pub String);
 
@@ -180,6 +226,59 @@ async fn sync(
     let user_id: i64 = user_row
         .try_get("id")
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    if !valid_hardware_hashes(&req.hardware_hashes)
+        || !valid_environment_class(&req.environment_class)
+    {
+        return Err(StatusCode::UNPROCESSABLE_ENTITY);
+    }
+    for hash in req.hardware_hashes.values() {
+        let banned: bool =
+            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM hardware_bans WHERE sha256_hash = $1)")
+                .bind(hash)
+                .fetch_one(&state.db)
+                .await
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        if banned {
+            let _ =
+                sqlx::query("UPDATE users SET banned = TRUE, banned_until = NULL WHERE id = $1")
+                    .bind(user_id)
+                    .execute(&state.db)
+                    .await;
+            return Err(StatusCode::FORBIDDEN);
+        }
+    }
+    for (kind, hash) in &req.hardware_hashes {
+        sqlx::query(
+            "INSERT INTO hardware_fingerprints (user_id, kind, sha256_hash, environment_class) VALUES ($1, $2, $3, $4) \
+             ON CONFLICT (user_id, kind, sha256_hash) DO UPDATE SET last_seen_at = now(), environment_class = EXCLUDED.environment_class",
+        )
+        .bind(user_id)
+        .bind(kind)
+        .bind(hash)
+        .bind(&req.environment_class)
+        .execute(&state.db)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        if req.environment_class == "physical" {
+            let linked_users = sqlx::query_scalar::<_, i64>("SELECT user_id FROM hardware_fingerprints WHERE sha256_hash = $1 AND user_id <> $2")
+                .bind(hash)
+                .bind(user_id)
+                .fetch_all(&state.db)
+                .await
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+            for related_user_id in linked_users {
+                let cluster_key = format!("hardware:{hash}");
+                let cluster_id: i64 = sqlx::query_scalar("INSERT INTO review_clusters (cluster_key) VALUES ($1) ON CONFLICT (cluster_key) DO UPDATE SET updated_at = now() RETURNING id")
+                    .bind(&cluster_key).fetch_one(&state.db).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+                let dedupe_key = format!("hardware-link:{user_id}:{hash}");
+                let case_id: i64 = sqlx::query_scalar("INSERT INTO review_cases (cluster_id, subject_user_id, dedupe_key, priority, summary) VALUES ($1, $2, $3, 0, 'Shared physical-device hash requires review') ON CONFLICT (dedupe_key) DO UPDATE SET updated_at = now() RETURNING id")
+                    .bind(cluster_id).bind(user_id).bind(&dedupe_key).fetch_one(&state.db).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+                let _ = sqlx::query("INSERT INTO review_case_edges (case_id, edge_type, strength, subject_value, related_user_id) VALUES ($1, 'shared_device_hash', 'strong', $2, $3) ON CONFLICT DO NOTHING")
+                    .bind(case_id).bind(hash).bind(related_user_id).execute(&state.db).await;
+            }
+        }
+    }
 
     // Parse GitHub URL from remote
     let github_url = req.remote_url.as_deref().and_then(parse_github_url);
@@ -271,20 +370,18 @@ async fn sync(
     }
 
     // Store commit SHA if provided
-    if let Some(sha) = &req.head_sha {
-        if let Some(repo_id) = repository_id {
-            let _ = sqlx::query(
-                "INSERT INTO commits (sha, repository_id, user_id, tree_hash) \
-                 VALUES ($1, $2, $3, $4) \
-                 ON CONFLICT (sha) DO NOTHING",
-            )
-            .bind(sha)
-            .bind(repo_id)
-            .bind(user_id)
-            .bind("0000000000000000000000000000000000000000")
-            .execute(&state.db)
-            .await;
-        }
+    if let (Some(sha), Some(repo_id)) = (&req.head_sha, repository_id) {
+        let _ = sqlx::query(
+            "INSERT INTO commits (sha, repository_id, user_id, tree_hash) \
+             VALUES ($1, $2, $3, $4) \
+             ON CONFLICT (sha) DO NOTHING",
+        )
+        .bind(sha)
+        .bind(repo_id)
+        .bind(user_id)
+        .bind("0000000000000000000000000000000000000000")
+        .execute(&state.db)
+        .await;
     }
 
     // Sync annotations
@@ -292,6 +389,8 @@ async fn sync(
     for ann in &req.annotations {
         if !["debugging", "guided", "delegated", "reading", "exploring"]
             .contains(&ann.label.as_str())
+            || !safe_metadata(&ann.session_key, 128)
+            || !safe_metadata(&ann.evidence, 1_024)
         {
             continue;
         }
@@ -313,6 +412,9 @@ async fn sync(
     // Sync checkpoints
     let mut checkpoints_synced: i64 = 0;
     for cp in &req.checkpoints {
+        if !safe_metadata(&cp.cursor, 1_024) {
+            continue;
+        }
         let _ = sqlx::query("INSERT INTO checkpoints (user_id, cursor) VALUES ($1, $2)")
             .bind(user_id)
             .bind(&cp.cursor)
@@ -389,7 +491,7 @@ async fn sync(
         if event.session_id.is_empty()
             || event.session_id.len() > 128
             || event.occurred_at_unix_ms < 0
-            || event.signals.get("prompt").is_some()
+            || contains_prompt_text(&event.signals)
         {
             continue;
         }
@@ -446,7 +548,7 @@ fn parse_github_url(url: &str) -> Option<(String, String)> {
         if parts.len() >= 2 {
             let owner = parts[0].to_string();
             let name = parts[1].trim_end_matches(".git").to_string();
-            if !owner.is_empty() && !name.is_empty() {
+            if valid_github_component(&owner) && valid_github_component(&name) {
                 return Some((owner, name));
             }
         }
@@ -457,10 +559,18 @@ fn parse_github_url(url: &str) -> Option<(String, String)> {
         if parts.len() >= 2 {
             let owner = parts[0].to_string();
             let name = parts[1].trim_end_matches(".git").to_string();
-            if !owner.is_empty() && !name.is_empty() {
+            if valid_github_component(&owner) && valid_github_component(&name) {
                 return Some((owner, name));
             }
         }
     }
     None
+}
+
+fn valid_github_component(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 100
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
 }

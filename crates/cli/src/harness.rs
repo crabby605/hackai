@@ -3,7 +3,7 @@
 //! Hook payloads may contain prompts, paths, command lines, and tool output.
 //! This module derives coarse local signals and persists only those signals.
 
-use crate::{prompt_classifier, state};
+use crate::{classifier, state};
 use serde_json::{Value, json};
 use std::{
     fs,
@@ -132,7 +132,7 @@ pub fn handle_hook(repo: &Path, harness: &str, event: &str) -> io::Result<()> {
 
     let blocked = prompt
         .map(|source| {
-            let signals = prompt_classifier::classify_prompt(source);
+            let signals = classifier::classify_prompt(source);
             append_prompt_event(
                 repo,
                 harness,
@@ -155,7 +155,7 @@ pub fn handle_hook(repo: &Path, harness: &str, event: &str) -> io::Result<()> {
 pub fn run_aider(repo: &Path, args: &[String]) -> io::Result<()> {
     let root = state::root(repo)?;
     if let Some(prompt) = aider_message(args)? {
-        let signals = prompt_classifier::classify_prompt(&prompt);
+        let signals = classifier::classify_prompt(&prompt);
         append_prompt_event(&root, "aider", "message", "aider-cli", false, &signals)?;
         if signals.do_not_comply {
             return Err(io::Error::new(
@@ -314,7 +314,7 @@ fn append_prompt_event(
     event: &str,
     session_id: &str,
     pasted_environment_hint: bool,
-    signals: &prompt_classifier::PromptSignals,
+    signals: &classifier::PromptSignals,
 ) -> io::Result<()> {
     append_line(
         repo,

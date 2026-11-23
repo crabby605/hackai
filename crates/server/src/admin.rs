@@ -39,6 +39,12 @@ pub struct AdminUser {
     pub email: Option<String>,
     pub slack_id: Option<String>,
     pub avatar_url: Option<String>,
+    pub country_code: Option<String>,
+    pub profile_public: bool,
+    pub leaderboard_opt_out: bool,
+    pub projects: i64,
+    pub episodes: i64,
+    pub credited_seconds: i64,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -106,6 +112,11 @@ pub struct AdminBody {
     pub is_admin: bool,
 }
 
+#[derive(Deserialize)]
+pub struct HardwareBanBody {
+    pub sha256_hash: String,
+}
+
 #[derive(Serialize)]
 pub struct AdminInsights {
     pub users: i64,
@@ -119,12 +130,15 @@ pub struct AdminInsights {
     pub failed_batches: i64,
     pub harnesses: Vec<serde_json::Value>,
     pub projects_list: Vec<serde_json::Value>,
+    pub recently_active: Vec<serde_json::Value>,
+    pub risky_cases: Vec<serde_json::Value>,
 }
 
 pub fn routes() -> axum::Router<AppState> {
     axum::Router::new()
         .route("/api/v1/admin/sessions", get(list_sessions))
         .route("/api/v1/admin/users", get(list_users))
+        .route("/api/v1/admin/users/{id}", get(get_user_review))
         .route("/api/v1/admin/users/{id}/admin", post(set_admin))
         .route("/api/v1/admin/users/{id}/projects", get(user_projects))
         .route("/api/v1/admin/activity", get(list_activity))
@@ -136,6 +150,7 @@ pub fn routes() -> axum::Router<AppState> {
         .route("/api/v1/admin/users/{id}/ban", post(ban_user))
         .route("/api/v1/admin/users/{id}/unban", post(unban_user))
         .route("/api/v1/admin/users/{id}/cooldown", post(set_cooldown))
+        .route("/api/v1/admin/hardware-ban", post(ban_hardware))
 }
 
 async fn insights(
@@ -211,6 +226,37 @@ async fn insights(
         "credited_seconds": row.try_get::<i64, _>("credited_seconds").unwrap_or(0),
         "last_active": row.try_get::<Option<i64>, _>("last_active").unwrap_or(None),
     })).collect();
+    let active_rows = sqlx::query("SELECT u.id, u.username, u.display_name, EXTRACT(EPOCH FROM MAX(e.ended_at))::BIGINT * 1000 AS last_active, COALESCE(SUM(e.credited_seconds), 0)::BIGINT AS credited_seconds FROM users u JOIN productive_episodes e ON e.user_id = u.id GROUP BY u.id, u.username, u.display_name ORDER BY MAX(e.ended_at) DESC LIMIT 10")
+        .fetch_all(&state.db).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let recently_active = active_rows
+        .into_iter()
+        .map(|row| {
+            serde_json::json!({
+                "id": row.try_get::<i64, _>("id").unwrap_or_default().to_string(),
+                "username": row.try_get::<String, _>("username").unwrap_or_default(),
+                "display_name": row.try_get::<Option<String>, _>("display_name").unwrap_or(None),
+                "last_active": row.try_get::<Option<i64>, _>("last_active").unwrap_or(None),
+                "credited_seconds": row.try_get::<i64, _>("credited_seconds").unwrap_or(0),
+            })
+        })
+        .collect();
+    let case_rows = sqlx::query("SELECT c.id, c.subject_user_id, u.username, u.display_name, c.priority, c.status, c.summary, EXTRACT(EPOCH FROM c.opened_at)::BIGINT * 1000 AS opened_at FROM review_cases c JOIN users u ON u.id = c.subject_user_id WHERE c.status IN ('open', 'hold', 'sample') ORDER BY c.priority DESC, c.opened_at ASC LIMIT 10")
+        .fetch_all(&state.db).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let risky_cases = case_rows
+        .into_iter()
+        .map(|row| {
+            serde_json::json!({
+                "id": row.try_get::<i64, _>("id").unwrap_or_default().to_string(),
+                "user_id": row.try_get::<i64, _>("subject_user_id").unwrap_or_default().to_string(),
+                "username": row.try_get::<String, _>("username").unwrap_or_default(),
+                "display_name": row.try_get::<Option<String>, _>("display_name").unwrap_or(None),
+                "priority": row.try_get::<i64, _>("priority").unwrap_or(0),
+                "status": row.try_get::<String, _>("status").unwrap_or_default(),
+                "summary": row.try_get::<String, _>("summary").unwrap_or_default(),
+                "opened_at": row.try_get::<Option<i64>, _>("opened_at").unwrap_or(None),
+            })
+        })
+        .collect();
     Ok(Json(AdminInsights {
         users,
         public_profiles,
@@ -223,6 +269,8 @@ async fn insights(
         failed_batches,
         harnesses,
         projects_list,
+        recently_active,
+        risky_cases,
     }))
 }
 
@@ -286,7 +334,7 @@ async fn require_admin(state: &AppState, headers: &HeaderMap) -> Result<i64, Sta
         .await
         .ok_or(StatusCode::UNAUTHORIZED)?;
 
-    let row = sqlx::query("SELECT is_admin FROM users WHERE auth_subject = $1")
+    let row = sqlx::query("SELECT id, is_admin FROM users WHERE auth_subject = $1")
         .bind(&sub)
         .fetch_optional(&state.db)
         .await
@@ -299,7 +347,19 @@ async fn require_admin(state: &AppState, headers: &HeaderMap) -> Result<i64, Sta
     if !is_admin {
         return Err(StatusCode::FORBIDDEN);
     }
-    Ok(0) // placeholder; caller doesn't need the value
+    row.try_get("id")
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+}
+
+async fn audit_mutation(state: &AppState, admin_user_id: i64, action: &str, target_user_id: i64) {
+    let _ = sqlx::query(
+        "INSERT INTO admin_audit_log (admin_user_id, action, target_user_id) VALUES ($1, $2, $3)",
+    )
+    .bind(admin_user_id)
+    .bind(action)
+    .bind(target_user_id)
+    .execute(&state.db)
+    .await;
 }
 
 async fn set_admin(
@@ -308,10 +368,11 @@ async fn set_admin(
     Path(id): Path<i64>,
     Json(body): Json<AdminBody>,
 ) -> Result<Json<AdminUser>, StatusCode> {
-    let _ = require_admin(&state, &headers).await?;
+    let admin_user_id = require_admin(&state, &headers).await?;
     let row = sqlx::query(
         "UPDATE users SET is_admin = $2 WHERE id = $1
-         RETURNING id, username, is_admin, display_name, email, slack_id, avatar_url",
+         AND ($2 = TRUE OR is_admin = FALSE OR (SELECT COUNT(*) FROM users WHERE is_admin = TRUE) > 1)
+         RETURNING id, username, is_admin, display_name, email, slack_id, avatar_url, country_code, profile_public, leaderboard_opt_out",
     )
     .bind(id)
     .bind(body.is_admin)
@@ -319,6 +380,17 @@ async fn set_admin(
     .await
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
     .ok_or(StatusCode::NOT_FOUND)?;
+    audit_mutation(
+        &state,
+        admin_user_id,
+        if body.is_admin {
+            "grant_admin"
+        } else {
+            "revoke_admin"
+        },
+        id,
+    )
+    .await;
     Ok(Json(AdminUser {
         id: row
             .try_get("id")
@@ -333,6 +405,12 @@ async fn set_admin(
         email: row.try_get("email").ok(),
         slack_id: row.try_get("slack_id").ok(),
         avatar_url: row.try_get("avatar_url").ok(),
+        country_code: row.try_get("country_code").ok(),
+        profile_public: row.try_get("profile_public").unwrap_or(true),
+        leaderboard_opt_out: row.try_get("leaderboard_opt_out").unwrap_or(false),
+        projects: 0,
+        episodes: 0,
+        credited_seconds: 0,
     }))
 }
 
@@ -342,7 +420,7 @@ async fn ban_user(
     Path(id): Path<i64>,
     Json(body): Json<BanBody>,
 ) -> Result<StatusCode, StatusCode> {
-    let _ = require_admin(&state, &headers).await?;
+    let admin_user_id = require_admin(&state, &headers).await?;
 
     let until = body
         .until
@@ -353,7 +431,7 @@ async fn ban_user(
     let row = sqlx::query(
         "UPDATE users \
          SET banned = TRUE, banned_until = $2 \
-         WHERE id = $1 \
+         WHERE id = $1 AND is_admin = FALSE \
          RETURNING id",
     )
     .bind(id)
@@ -363,8 +441,10 @@ async fn ban_user(
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     if row.is_none() {
-        return Err(StatusCode::NOT_FOUND);
+        return Err(StatusCode::CONFLICT);
     }
+
+    audit_mutation(&state, admin_user_id, "ban", id).await;
 
     Ok(StatusCode::NO_CONTENT)
 }
@@ -374,12 +454,12 @@ async fn unban_user(
     headers: HeaderMap,
     Path(id): Path<i64>,
 ) -> Result<StatusCode, StatusCode> {
-    let _ = require_admin(&state, &headers).await?;
+    let admin_user_id = require_admin(&state, &headers).await?;
 
     let row = sqlx::query(
         "UPDATE users \
          SET banned = FALSE, banned_until = NULL \
-         WHERE id = $1 \
+         WHERE id = $1 AND is_admin = FALSE \
          RETURNING id",
     )
     .bind(id)
@@ -388,8 +468,10 @@ async fn unban_user(
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     if row.is_none() {
-        return Err(StatusCode::NOT_FOUND);
+        return Err(StatusCode::CONFLICT);
     }
+
+    audit_mutation(&state, admin_user_id, "unban", id).await;
 
     Ok(StatusCode::NO_CONTENT)
 }
@@ -405,12 +487,12 @@ async fn set_cooldown(
     Path(id): Path<i64>,
     Json(body): Json<CooldownBody>,
 ) -> Result<StatusCode, StatusCode> {
-    let _ = require_admin(&state, &headers).await?;
+    let admin_user_id = require_admin(&state, &headers).await?;
 
     let row = sqlx::query(
         "UPDATE users \
          SET cooldown_until = $2 \
-         WHERE id = $1 \
+         WHERE id = $1 AND is_admin = FALSE \
          RETURNING id",
     )
     .bind(id)
@@ -420,9 +502,36 @@ async fn set_cooldown(
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     if row.is_none() {
-        return Err(StatusCode::NOT_FOUND);
+        return Err(StatusCode::CONFLICT);
     }
 
+    audit_mutation(&state, admin_user_id, "set_cooldown", id).await;
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn ban_hardware(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<HardwareBanBody>,
+) -> Result<StatusCode, StatusCode> {
+    let admin_user_id = require_admin(&state, &headers).await?;
+    let hash = body.sha256_hash.to_ascii_lowercase();
+    if hash.len() != 64 || !hash.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(StatusCode::UNPROCESSABLE_ENTITY);
+    }
+    sqlx::query("INSERT INTO hardware_bans (sha256_hash, banned_by) VALUES ($1, $2) ON CONFLICT (sha256_hash) DO NOTHING")
+        .bind(&hash)
+        .bind(admin_user_id)
+        .execute(&state.db)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    sqlx::query("UPDATE users SET banned = TRUE, banned_until = NULL WHERE id IN (SELECT user_id FROM hardware_fingerprints WHERE sha256_hash = $1)")
+        .bind(&hash)
+        .execute(&state.db)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    audit_mutation(&state, admin_user_id, "ban_hardware", admin_user_id).await;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -566,10 +675,17 @@ async fn list_users(
         .unwrap_or("%".to_string());
 
     let rows = sqlx::query(
-        "SELECT id, username, is_admin, display_name, email, slack_id, avatar_url \
-         FROM users \
-         WHERE username ILIKE $1 OR display_name ILIKE $1 \
-         ORDER BY username ASC \
+        "SELECT u.id, u.username, u.is_admin, u.display_name, u.email, u.slack_id, u.avatar_url, \
+                u.country_code, u.profile_public, u.leaderboard_opt_out, \
+                COUNT(DISTINCT p.id)::BIGINT AS projects, \
+                COUNT(DISTINCT e.id)::BIGINT AS episodes, \
+                COALESCE(SUM(e.credited_seconds), 0)::BIGINT AS credited_seconds \
+         FROM users u \
+         LEFT JOIN projects p ON p.owner_id = u.id AND p.deleted_at IS NULL \
+         LEFT JOIN productive_episodes e ON e.user_id = u.id \
+         WHERE u.username ILIKE $1 OR u.display_name ILIKE $1 \
+         GROUP BY u.id, u.username, u.is_admin, u.display_name, u.email, u.slack_id, u.avatar_url, u.country_code, u.profile_public, u.leaderboard_opt_out \
+         ORDER BY u.username ASC \
          LIMIT $2",
     )
     .bind(q)
@@ -590,15 +706,169 @@ async fn list_users(
             is_admin: row
                 .try_get("is_admin")
                 .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
-            display_name: row
-                .try_get("display_name")
-                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
+            display_name: row.try_get("display_name").ok(),
             email: row.try_get("email").ok(),
             slack_id: row.try_get("slack_id").ok(),
             avatar_url: row.try_get("avatar_url").ok(),
+            country_code: row.try_get("country_code").ok(),
+            profile_public: row.try_get("profile_public").unwrap_or(true),
+            leaderboard_opt_out: row.try_get("leaderboard_opt_out").unwrap_or(false),
+            projects: row.try_get("projects").unwrap_or(0),
+            episodes: row.try_get("episodes").unwrap_or(0),
+            credited_seconds: row.try_get("credited_seconds").unwrap_or(0),
         });
     }
     Ok(Json(out))
+}
+
+async fn get_user_review(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let _ = require_admin(&state, &headers).await?;
+
+    let user_row = sqlx::query(
+        "SELECT username, display_name, avatar_url, country_code, profile_public \
+         FROM users WHERE id = $1",
+    )
+    .bind(id)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+    .ok_or(StatusCode::NOT_FOUND)?;
+
+    let username: String = user_row
+        .try_get("username")
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let display_name: Option<String> = user_row.try_get("display_name").ok();
+    let avatar_url: Option<String> = user_row.try_get("avatar_url").ok();
+    let country_code: Option<String> = user_row.try_get("country_code").ok();
+    let profile_public: bool = user_row.try_get("profile_public").unwrap_or(true);
+
+    let project_rows = sqlx::query(
+        "SELECT p.id, p.name, r.remote_url, \
+                COUNT(e.id)::BIGINT AS episodes, \
+                COALESCE(SUM(e.credited_seconds), 0)::BIGINT AS credited_seconds \
+         FROM projects p \
+         LEFT JOIN repositories r ON r.project_id = p.id \
+         LEFT JOIN productive_episodes e ON e.project_id = p.id \
+         WHERE p.owner_id = $1 AND p.deleted_at IS NULL \
+         GROUP BY p.id, p.name, r.remote_url \
+         ORDER BY credited_seconds DESC, p.name ASC",
+    )
+    .bind(id)
+    .fetch_all(&state.db)
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let projects: Vec<serde_json::Value> = project_rows
+        .into_iter()
+        .map(|r| {
+            serde_json::json!({
+                "id": r.try_get::<i64, _>("id").unwrap_or_default().to_string(),
+                "name": r.try_get::<String, _>("name").unwrap_or_default(),
+                "remote_url": r.try_get::<Option<String>, _>("remote_url").unwrap_or(None),
+                "episodes": r.try_get::<i64, _>("episodes").unwrap_or(0),
+                "credited_seconds": r.try_get::<i64, _>("credited_seconds").unwrap_or(0),
+            })
+        })
+        .collect();
+
+    let episode_rows = sqlx::query(
+        "SELECT id, COALESCE(batch_id, '') AS batch_id, project_id, session_key, harness, \
+                EXTRACT(EPOCH FROM started_at)::BIGINT * 1000 AS started_at, \
+                EXTRACT(EPOCH FROM ended_at)::BIGINT * 1000 AS ended_at, \
+                attempts, CASE WHEN resolved THEN 1 ELSE 0 END AS resolved, \
+                credited_seconds, human_edit_seconds, agent_edit_seconds, \
+                signatures::TEXT AS signatures_json, \
+                files_touched::TEXT AS files_touched_json, \
+                evidence_ids::TEXT AS evidence_ids_json, \
+                formula_version, \
+                'archived' AS batch_status, \
+                0::BIGINT AS batch_bytes, \
+                EXTRACT(EPOCH FROM created_at)::BIGINT * 1000 AS batch_received_at \
+         FROM productive_episodes \
+         WHERE user_id = $1 \
+         ORDER BY started_at DESC \
+         LIMIT 100",
+    )
+    .bind(id)
+    .fetch_all(&state.db)
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let episodes: Vec<serde_json::Value> = episode_rows
+        .into_iter()
+        .map(|r| {
+            serde_json::json!({
+                "id": r.try_get::<i64, _>("id").unwrap_or_default().to_string(),
+                "batch_id": r.try_get::<String, _>("batch_id").unwrap_or_default(),
+                "project_id": r.try_get::<i64, _>("project_id").unwrap_or_default().to_string(),
+                "session_key": r.try_get::<String, _>("session_key").unwrap_or_default(),
+                "harness": r.try_get::<Option<String>, _>("harness").unwrap_or(None),
+                "started_at": r.try_get::<i64, _>("started_at").unwrap_or(0),
+                "ended_at": r.try_get::<i64, _>("ended_at").unwrap_or(0),
+                "attempts": r.try_get::<i32, _>("attempts").unwrap_or(1),
+                "resolved": r.try_get::<i32, _>("resolved").unwrap_or(0),
+                "credited_seconds": r.try_get::<i64, _>("credited_seconds").unwrap_or(0),
+                "human_edit_seconds": r.try_get::<i64, _>("human_edit_seconds").unwrap_or(0),
+                "agent_edit_seconds": r.try_get::<i64, _>("agent_edit_seconds").unwrap_or(0),
+                "signatures_json": r.try_get::<String, _>("signatures_json").unwrap_or_else(|_| "[]".into()),
+                "files_touched_json": r.try_get::<String, _>("files_touched_json").unwrap_or_else(|_| "[]".into()),
+                "evidence_ids_json": r.try_get::<String, _>("evidence_ids_json").unwrap_or_else(|_| "[]".into()),
+                "formula_version": r.try_get::<i32, _>("formula_version").unwrap_or(1),
+                "batch_status": r.try_get::<String, _>("batch_status").unwrap_or_else(|_| "archived".into()),
+                "batch_bytes": r.try_get::<i64, _>("batch_bytes").unwrap_or(0),
+                "batch_received_at": r.try_get::<i64, _>("batch_received_at").unwrap_or(0),
+            })
+        })
+        .collect();
+
+    let installation_rows =
+        sqlx::query("SELECT id FROM api_keys WHERE user_id = $1 AND revoked_at IS NULL")
+            .bind(id)
+            .fetch_all(&state.db)
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let installations: Vec<serde_json::Value> = installation_rows
+        .into_iter()
+        .map(|r| {
+            serde_json::json!({
+                "id": r.try_get::<i64, _>("id").unwrap_or_default().to_string(),
+            })
+        })
+        .collect();
+
+    let hardware_rows = sqlx::query(
+        "SELECT kind, sha256_hash FROM hardware_fingerprints WHERE user_id = $1 ORDER BY kind, last_seen_at DESC",
+    )
+    .bind(id)
+    .fetch_all(&state.db)
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let hardware_hashes: Vec<serde_json::Value> = hardware_rows
+        .into_iter()
+        .map(|row| {
+            serde_json::json!({
+                "kind": row.try_get::<String, _>("kind").unwrap_or_default(),
+            "sha256_hash": row.try_get::<String, _>("sha256_hash").unwrap_or_default(),
+            })
+        })
+        .collect();
+
+    Ok(Json(serde_json::json!({
+        "username": username,
+        "display_name": display_name,
+        "avatar_url": avatar_url,
+        "country_code": country_code,
+        "profile_public": profile_public,
+        "projects": projects,
+        "episodes": episodes,
+        "installations": installations,
+        "hardware_hashes": hardware_hashes,
+    })))
 }
 
 // ---- Admin: projects for a specific user ----

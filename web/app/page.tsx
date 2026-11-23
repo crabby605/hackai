@@ -29,9 +29,9 @@ async function Home() {
 
       <div className="landing-hero">
         <h1>Build with AI.<br />Know what it <span>takes.</span></h1>
-        <p className="landing-copy">Understand how effectively you use AI: track focused time, collaboration mix, and the sessions that need another pass.</p>
+        <p className="landing-copy">Understand your AI-assisted work with local, privacy-preserving activity summaries.</p>
         <div className="hero-actions">
-          <a className={cn(buttonVariants({ size: "lg" }))} href="/login">Open dashboard <span aria-hidden="true">→</span></a>
+          <a className={cn(buttonVariants({ size: "lg" }))} href="/login">Open dashboard</a>
         </div>
       </div>
 
@@ -39,14 +39,14 @@ async function Home() {
         <div className="preview-topbar"><i></i><i></i><i></i></div>
         <div className="preview-body">
           <aside><b>Hack<span>AI</span></b><small>Overview</small><small>Projects</small><small>Struggles</small></aside>
-          <div className="preview-content"><em>Workspace diagnostics</em><h2>Find the <span>work that needs attention.</span></h2><div className="preview-metrics"><b>4.6h<small>Credited today</small></b><b>72%<small>Human contribution</small></b><b>3<small>Open loops</small></b></div></div>
+          <div className="preview-content"><em>Workspace activity</em><h2>See the <span>work you recorded.</span></h2><div className="preview-metrics"><b>4.6h<small>Recorded today</small></b><b>72%<small>Human-present time</small></b><b>3<small>Episodes</small></b></div></div>
         </div>
       </div>
 
       <div className="landing-principles" id="features">
-        <article id="why"><b>Diagnose friction</b><p>Find repeated attempts, unresolved work, and patterns worth fixing.</p></article>
+        <article id="why"><b>Review activity</b><p>See timing, iteration, and outcomes across recorded sessions.</p></article>
         <article><b>Separate the signals</b><p>Understand the contribution of human work and AI-assisted work.</p></article>
-        <article id="privacy"><b>Keep control</b><p>Raw prompts, tool output, and file paths stay out of your dashboard.</p></article>
+        <article id="privacy"><b>Keep control</b><p>Raw prompts and tool output stay on your device; the dashboard uses derived records.</p></article>
       </div>
     </section>
   )

@@ -391,18 +391,21 @@ pub async fn extract_current_user(
         let token_hash = Sha256::digest(raw_val.as_bytes());
         let ip = client_ip(headers);
         let binding = sqlx::query_scalar::<_, String>(
-            "SELECT client_ip FROM session_ip_bindings WHERE token_hash = $1",
+            "SELECT client_ip FROM session_ip_bindings WHERE token_hash = $1 AND expires_at > now()",
         )
         .bind(token_hash.as_slice())
         .fetch_optional(db)
         .await
         .ok()
         .flatten();
-        if binding.as_deref().is_some_and(|bound| bound != ip) {
+        if binding
+            .as_deref()
+            .is_some_and(|bound| bound != "unknown" && ip != "unknown" && bound != ip)
+        {
             return None;
         }
         let _ = sqlx::query(
-            "UPDATE session_ip_bindings SET last_seen_at = now() WHERE token_hash = $1",
+            "UPDATE session_ip_bindings SET last_seen_at = now() WHERE token_hash = $1 AND expires_at > now()",
         )
         .bind(token_hash.as_slice())
         .execute(db)
@@ -461,6 +464,15 @@ pub fn auth_routes() -> Router<AppState> {
         .route("/auth/callback", get(callback))
 }
 
+fn safe_continue_path(path: &str) -> Option<&str> {
+    (path.starts_with('/')
+        && !path.starts_with("//")
+        && !path
+            .bytes()
+            .any(|byte| byte == b'\\' || byte.is_ascii_control()))
+    .then_some(path)
+}
+
 async fn login(
     State(app): State<AppState>,
     Query(params): Query<std::collections::HashMap<String, String>>,
@@ -476,7 +488,7 @@ async fn login(
     let state_nonce = Uuid::new_v4().to_string();
     let continue_path = params
         .get("continue")
-        .map(|s| s.as_str())
+        .and_then(|path| safe_continue_path(path))
         .unwrap_or("/dashboard");
     let url = url::Url::parse_with_params(
         &state.authorization_endpoint,
@@ -531,6 +543,7 @@ async fn callback(
         Some(v) => (v, "/dashboard"),
         None => ("", "/dashboard"),
     };
+    let continue_path = safe_continue_path(continue_path).unwrap_or("/dashboard");
     if expected_state != query.state {
         return Err(AuthError::InvalidToken("OAuth state mismatch".into()));
     }
@@ -592,18 +605,42 @@ async fn callback(
 
     let session_token = app.auth.issue_session_token(&claims.sub)?;
     let token_hash = Sha256::digest(session_token.as_bytes());
+    let user_id: i64 = sqlx::query_scalar("SELECT id FROM users WHERE auth_subject = $1")
+        .bind(&claims.sub)
+        .fetch_one(&app.db)
+        .await
+        .map_err(|e| AuthError::Upstream(format!("session user lookup: {e}")))?;
     sqlx::query(
-        "INSERT INTO session_ip_bindings (token_hash, client_ip) VALUES ($1, $2) \
-         ON CONFLICT (token_hash) DO UPDATE SET client_ip = EXCLUDED.client_ip, last_seen_at = now()",
+        "INSERT INTO session_ip_bindings (token_hash, user_id, client_ip, expires_at) \
+         VALUES ($1, $2, $3, now() + interval '30 days') \
+         ON CONFLICT (token_hash) DO UPDATE SET user_id = EXCLUDED.user_id, client_ip = EXCLUDED.client_ip, expires_at = EXCLUDED.expires_at, last_seen_at = now()",
     )
     .bind(token_hash.as_slice())
+    .bind(user_id)
     .bind(client_ip(&headers))
     .execute(&app.db)
     .await
     .map_err(|e| AuthError::Upstream(format!("session binding: {e}")))?;
 
     let is_https = app.auth.redirect_uri.starts_with("https://");
-    let mut response = Redirect::to(continue_path).into_response();
+    let frontend_url = std::env::var("FRONTEND_URL")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| {
+            if app.auth.redirect_uri.contains("localhost:3000")
+                || app.auth.redirect_uri.contains("127.0.0.1:3000")
+            {
+                "http://localhost:3001".to_string()
+            } else {
+                String::new()
+            }
+        });
+    let redirect_target = if !frontend_url.is_empty() && continue_path.starts_with('/') {
+        format!("{}{}", frontend_url.trim_end_matches('/'), continue_path)
+    } else {
+        continue_path.to_string()
+    };
+    let mut response = Redirect::to(&redirect_target).into_response();
     response.headers_mut().extend(session_cookie(
         &session_token,
         is_https,
@@ -635,5 +672,26 @@ impl IntoResponse for AuthError {
             AuthError::Upstream(_) => StatusCode::BAD_GATEWAY,
         };
         (status, self.to_string()).into_response()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::safe_continue_path;
+
+    #[test]
+    fn continue_paths_stay_on_the_frontend() {
+        assert_eq!(
+            safe_continue_path("/dashboard?tab=week"),
+            Some("/dashboard?tab=week")
+        );
+        for path in [
+            "https://evil.example",
+            "//evil.example",
+            "/\\evil.example",
+            "/bad\r\nLocation: https://evil.example",
+        ] {
+            assert_eq!(safe_continue_path(path), None);
+        }
     }
 }

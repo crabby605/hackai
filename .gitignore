@@ -2,16 +2,28 @@
 /fuzz/artifacts/
 /fuzz/corpus/
 .env
+.env.*
+!.env.example
 .hackai/
 .hackai.cfg
 /ml/*.local.jsonl
 web/.dev.vars
 web/.next/
-web/public/
 .DS_Store
-serverless/
 web/node_modules/
 web/.open-next/
 web/.wrangler/
-deploy/
-web/wrangler.jsonc
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+*.db
+*.db-wal
+*.db-shm
+*.pem
+*.key
+
+# Keep the project overview and documentation readmes; nested package/tool
+# readmes are generated or vendor material unless explicitly added later.
+**/README.md
+!README.md
+!docs/**/README.md

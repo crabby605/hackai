@@ -5,8 +5,16 @@ import { cn } from "@/lib/utils"
 
 interface Profile {
   username: string
+  display_name: string | null
+  country_code: string | null
   is_admin: boolean
   avatar_url: string | null
+}
+
+function flag(country: string | null) {
+  return country && /^[A-Z]{2}$/.test(country)
+    ? String.fromCodePoint(...[...country].map((letter) => 127397 + letter.charCodeAt(0)))
+    : ""
 }
 
 function escapeHtml(s: string): string {
@@ -47,10 +55,15 @@ export default async function ProfilePage({
   return (
     <section className="state-card">
       <p className="eyebrow">Public builder profile</p>
-      <h1 style={{ fontSize: "1.75rem", letterSpacing: "-0.04em", margin: "0 0 0.5rem" }}>
-        @{profile.username}
+      <h1 style={{ fontSize: "1.75rem", letterSpacing: "-0.04em", margin: "0 0 0.25rem" }}>
+        {profile.display_name ?? `@${profile.username}`} {flag(profile.country_code)}
       </h1>
-      <Avatar className="profile-avatar" aria-label={`${profile.username}'s profile image`} style={{ marginBottom: "1rem" }}><AvatarFallback>{profile.username.slice(0, 2).toUpperCase()}</AvatarFallback>{profile.avatar_url && <AvatarImage src={profile.avatar_url} alt="" referrerPolicy="no-referrer" />}</Avatar>
+      {profile.display_name && (
+        <p className="text-sm text-muted-foreground" style={{ margin: "0 0 0.75rem" }}>
+          @{profile.username}
+        </p>
+      )}
+      <Avatar className="profile-avatar" aria-label={`${profile.username}'s profile image`} style={{ marginBottom: "1rem" }}><AvatarFallback>{(profile.display_name ?? profile.username).slice(0, 2).toUpperCase()}</AvatarFallback>{profile.avatar_url && <AvatarImage src={profile.avatar_url} alt="" referrerPolicy="no-referrer" />}</Avatar>
       {profile.is_admin && (
         <p className="mb-4 text-sm font-semibold text-muted-foreground">
           Administrator

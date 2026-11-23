@@ -5,8 +5,9 @@ edition.workspace = true
 license.workspace = true
 
 [features]
-default = []
+default = ["dev-tools"]
 dev-tools = []
+
 [dependencies]
 clap = { version = "4.5", features = ["derive"] }
 hackai-paths = { path = "../paths" }
@@ -17,11 +18,14 @@ reqwest = { version = "0.12", default-features = false, features = ["blocking", 
 rand = "0.10"
 hackai-parser = { path = "../parser" }
 hackai-scorer = { path = "../scorer" }
+hackai-schema = { path = "../schema" }
+hackai-gitx = { path = "../gitx" }
 dialoguer = "0.11"
 dirs = "5.0"
 keyring = "4.2"
 uuid = { version = "1.8", features = ["serde", "v4"] }
 tokio = { version = "1.38", features = ["rt", "macros"] }
 sha2 = "0.10"
+rusqlite = { version = "0.32", features = ["bundled"] }
 [lints]
 workspace = true

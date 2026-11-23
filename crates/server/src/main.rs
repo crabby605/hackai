@@ -2,11 +2,13 @@
 
 mod admin;
 mod annotations;
-mod archives;
 mod auth;
 mod cli;
+mod coach;
+mod evidence;
 mod ingest;
 mod policy;
+mod risk;
 mod rollups;
 mod sse;
 mod sync;
@@ -45,6 +47,7 @@ pub struct AppState {
     pub sse_hub: sse::SseHub,
     pub username_bloom: Arc<RwLock<UsernameBloom>>,
     pub ip_rate_limits: Arc<Mutex<HashMap<String, VecDeque<Instant>>>>,
+    pub admin_mutation_rate_limits: Arc<Mutex<HashMap<String, VecDeque<Instant>>>>,
 }
 
 async fn per_ip_rate_limit(
@@ -59,7 +62,7 @@ async fn per_ip_rate_limit(
         .lock()
         .ok()
         .map(|mut limits| {
-            let calls = limits.entry(ip).or_default();
+            let calls = limits.entry(ip.clone()).or_default();
             while calls
                 .front()
                 .is_some_and(|seen| now.duration_since(*seen).as_secs_f32() >= 1.0)
@@ -81,6 +84,41 @@ async fn per_ip_rate_limit(
             "rate limit exceeded",
         )
             .into_response();
+    }
+    let is_admin_mutation = request.uri().path().starts_with("/api/v1/admin/")
+        && matches!(
+            request.method(),
+            &axum::http::Method::POST | &axum::http::Method::DELETE
+        );
+    if is_admin_mutation {
+        let allowed = state
+            .admin_mutation_rate_limits
+            .lock()
+            .ok()
+            .map(|mut limits| {
+                let calls = limits.entry(ip).or_default();
+                while calls
+                    .front()
+                    .is_some_and(|seen| now.duration_since(*seen).as_secs() >= 60)
+                {
+                    calls.pop_front();
+                }
+                if calls.len() >= 10 {
+                    false
+                } else {
+                    calls.push_back(now);
+                    true
+                }
+            })
+            .unwrap_or(true);
+        if !allowed {
+            return (
+                StatusCode::TOO_MANY_REQUESTS,
+                [("retry-after", "60")],
+                "admin mutation rate limit exceeded",
+            )
+                .into_response();
+        }
     }
     next.run(request).await
 }
@@ -162,6 +200,7 @@ pub struct MeResponse {
     pub avatar_url: Option<String>,
     pub profile_public: bool,
     pub country_code: Option<String>,
+    pub leaderboard_opt_out: bool,
 }
 
 async fn me(
@@ -172,7 +211,8 @@ async fn me(
         .await
         .ok_or(StatusCode::UNAUTHORIZED)?;
     let row = sqlx::query(
-        "SELECT is_admin, username, display_name, email, slack_id, avatar_url, profile_public, country_code \
+        "SELECT is_admin, username, display_name, email, slack_id, avatar_url, profile_public, country_code, \
+                COALESCE(leaderboard_opt_out, false) AS leaderboard_opt_out \
          FROM users WHERE auth_subject = $1",
     )
     .bind(&sub)
@@ -204,6 +244,9 @@ async fn me(
     let country_code = row
         .try_get("country_code")
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let leaderboard_opt_out = row
+        .try_get("leaderboard_opt_out")
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     Ok(Json(MeResponse {
         sub,
         is_admin,
@@ -214,6 +257,7 @@ async fn me(
         avatar_url,
         profile_public,
         country_code,
+        leaderboard_opt_out,
     }))
 }
 
@@ -223,6 +267,8 @@ struct UpdateProfileRequest {
     profile_public: bool,
     #[serde(default)]
     country_code: Option<String>,
+    #[serde(default)]
+    leaderboard_opt_out: Option<bool>,
 }
 
 fn valid_username(username: &str) -> bool {
@@ -281,14 +327,17 @@ async fn update_profile(
         return Err(StatusCode::UNPROCESSABLE_ENTITY);
     }
     let row = sqlx::query(
-        "UPDATE users SET username = $1, profile_public = $2, country_code = $3 \
+        "UPDATE users SET username = $1, profile_public = $2, country_code = $3, \
+                leaderboard_opt_out = COALESCE($5, leaderboard_opt_out) \
          WHERE auth_subject = $4 \
-         RETURNING is_admin, username, display_name, email, slack_id, avatar_url, profile_public, country_code",
+         RETURNING is_admin, username, display_name, email, slack_id, avatar_url, profile_public, country_code, \
+                   COALESCE(leaderboard_opt_out, false) AS leaderboard_opt_out",
     )
     .bind(&username)
     .bind(request.profile_public)
     .bind(country_code)
     .bind(&sub)
+    .bind(request.leaderboard_opt_out)
     .fetch_one(&state.db)
     .await
     .map_err(|error| match error {
@@ -325,6 +374,9 @@ async fn update_profile(
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
         country_code: row
             .try_get("country_code")
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
+        leaderboard_opt_out: row
+            .try_get("leaderboard_opt_out")
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
     }))
 }
@@ -792,6 +844,9 @@ async fn get_user_id(db: &sqlx::Pool<sqlx::Postgres>, sub: &str) -> Result<i64, 
 pub struct ProfileResponse {
     pub username: String,
     pub is_admin: bool,
+    pub display_name: Option<String>,
+    pub avatar_url: Option<String>,
+    pub country_code: Option<String>,
 }
 
 fn is_valid_username(username: &str) -> bool {
@@ -812,7 +867,8 @@ async fn user_profile(
         return Err(StatusCode::NOT_FOUND);
     }
     let row = sqlx::query(
-        "SELECT username, is_admin FROM users WHERE username = $1 AND profile_public = TRUE",
+        "SELECT username, is_admin, display_name, avatar_url, country_code \
+         FROM users WHERE username = $1 AND profile_public = TRUE",
     )
     .bind(&username)
     .fetch_optional(&state.db)
@@ -825,7 +881,16 @@ async fn user_profile(
     let is_admin: bool = row
         .try_get("is_admin")
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    Ok(Json(ProfileResponse { username, is_admin }))
+    let display_name: Option<String> = row.try_get("display_name").ok();
+    let avatar_url: Option<String> = row.try_get("avatar_url").ok();
+    let country_code: Option<String> = row.try_get("country_code").ok();
+    Ok(Json(ProfileResponse {
+        username,
+        is_admin,
+        display_name,
+        avatar_url,
+        country_code,
+    }))
 }
 
 #[derive(Serialize)]
@@ -847,7 +912,7 @@ async fn leaderboard(
          FROM users u \
          LEFT JOIN projects p ON p.owner_id = u.id \
          LEFT JOIN rollups r ON r.user_id = u.id AND r.project_id = p.id \
-         WHERE u.profile_public = TRUE \
+         WHERE u.profile_public = TRUE AND (u.leaderboard_opt_out IS FALSE OR u.leaderboard_opt_out IS NULL) \
          GROUP BY u.id, u.username, u.display_name, u.country_code \
          HAVING COALESCE(SUM(r.credited_seconds), 0) > 0 \
          ORDER BY credited_seconds DESC, u.username ASC \
@@ -922,6 +987,7 @@ async fn main() {
         sse_hub,
         username_bloom: Arc::new(RwLock::new(username_bloom)),
         ip_rate_limits: Arc::new(Mutex::new(HashMap::new())),
+        admin_mutation_rate_limits: Arc::new(Mutex::new(HashMap::new())),
     };
 
     let request_id = HeaderName::from_static("x-request-id");
@@ -967,12 +1033,14 @@ async fn main() {
         .route("/api/v1/leaderboard", get(leaderboard))
         .route("/api/v1/users/{username}", get(user_profile))
         .merge(admin::routes())
-        .merge(archives::routes())
         .merge(cli::routes())
         .merge(annotations::routes())
         .merge(rollups::routes())
         .merge(sse::routes())
         .merge(sync::routes())
+        .merge(evidence::routes())
+        .merge(coach::routes())
+        .merge(risk::routes())
         .merge(auth::auth_routes())
         .merge(ingest::routes())
         .merge(policy::routes())

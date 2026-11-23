@@ -32,6 +32,8 @@ Set via `/auth/callback` after Hack Club OIDC login.
 |--------|------|------|-------------|
 | GET | `/api/v1/dashboard/stats` | Session | Daily stats (hours, human/agent ratio, episodes) |
 | GET | `/api/v1/dashboard/insights` | Session | Insights (harness, language, active day, PESDO) |
+| GET | `/api/v1/coach` | Session | Privacy-safe coaching patterns from opt-in derived evidence; never returns prompt text |
+| GET | `/api/v1/risk-findings` | Session | Transparent, review-only derived-evidence findings; never changes score, eligibility, or account status |
 
 ### Projects
 
@@ -72,6 +74,7 @@ Set via `/auth/callback` after Hack Club OIDC login.
 | POST | `/api/v1/admin/users/{id}/ban` | Admin | Ban user |
 | POST | `/api/v1/admin/users/{id}/unban` | Admin | Unban user |
 | POST | `/api/v1/admin/users/{id}/cooldown` | Admin | Set ingest cooldown |
+| POST | `/api/v1/admin/hardware-ban` | Admin | Ban all users matching a SHA-256 hardware digest |
 
 ### CLI Pairing (OAuth 2.0 Device Flow)
 
@@ -85,7 +88,13 @@ Set via `/auth/callback` after Hack Club OIDC login.
 
 | Method | Path | Auth | Description |
 |--------|------|------|-------------|
-| POST | `/api/v1/sync` | Bearer token | Push episodes, annotations, checkpoints |
+| POST | `/api/v1/sync` | Bearer token | Push episodes, annotations, checkpoints, and optional SHA-256 hardware digests |
+| POST | `/api/v1/evidence-bundles` | Session or Bearer token | Opt-in redacted event-level evidence bundle; raw prompt text, code, paths, and tool output are rejected |
+| GET | `/api/v1/evidence-bundles` | Session or Bearer token | Caller’s redacted evidence-bundle provenance summaries |
+| GET | `/api/v1/evidence-bundles/{bundle_id}` | Session or Bearer token | Caller’s derived event records and provenance |
+| GET | `/api/v1/admin/users/{id}/evidence-bundles` | Admin | Reviewer view of a user’s redacted provenance summaries |
+| GET | `/api/v1/admin/users/{id}/evidence-bundles/{bundle_id}` | Admin | Reviewer view of a redacted evidence packet |
+| GET | `/api/v1/admin/users/{id}/risk-findings` | Admin | Conservative review-only findings from that user’s derived evidence; no automatic enforcement |
 
 ### SSE
 
@@ -99,13 +108,6 @@ Set via `/auth/callback` after Hack Club OIDC login.
 |--------|------|------|-------------|
 | POST | `/v1/events` | Bearer token | Native event ingest |
 | POST | `/api/hackatime/v1/users/current/heartbeats.bulk` | Bearer token | WakaTime heartbeat bulk |
-
-### Archives
-
-| Method | Path | Auth | Description |
-|--------|------|------|-------------|
-| GET | `/api/v1/archives` | Session | User's archives (filters: project_id, from, to) |
-| GET | `/api/v1/admin/archives` | Admin | All archives (filters: user_id, project_id, from, to) |
 
 ---
 

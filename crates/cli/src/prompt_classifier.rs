@@ -3,8 +3,23 @@
 //! This module intentionally returns only coarse signals. Callers must not
 //! persist the source prompt or include it in sync/annotation payloads.
 
-use crate::prompt_model::{ModelPrediction, predict_from_default_path};
 use serde::Serialize;
+
+/// Placeholder for demoted local ML model. Returns Unknown until/if a
+/// calibrated, signed model is reinstated (see target.md §4).
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelPrediction {
+    #[default]
+    Unknown,
+    Low,
+    Medium,
+    High,
+}
+
+fn predict_from_default_path(_prompt: &str) -> ModelPrediction {
+    ModelPrediction::Unknown
+}
 
 /// A local estimate that the prompt delegates most task framing and decisions
 /// to the agent. It is not an AI-authorship or Markdown detector.

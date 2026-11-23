@@ -19,7 +19,7 @@ import {
   SidebarProvider,
   SidebarSeparator,
 } from "@/components/ui/sidebar";
-import { LayoutDashboard, BarChart3, CircleDot, FolderGit2, LogOut, Settings, ShieldCheck } from "lucide-react";
+import { LayoutDashboard, BarChart3, CircleDot, FileCheck2, FolderGit2, LogOut, Settings, ShieldCheck } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 
 interface Viewer { display_name: string | null; username: string; email: string | null; country_code: string | null; avatar_url: string | null; is_admin: boolean }
@@ -32,6 +32,7 @@ const nav: Array<[string, string, LucideIcon]> = [
   ["Overview", "/dashboard", LayoutDashboard],
   ["Projects", "/projects", FolderGit2],
   ["Struggles", "/struggles", CircleDot],
+  ["Evidence", "/evidence", FileCheck2],
   ["Leaderboard", "/leaderboard", BarChart3],
 ]
 
@@ -72,7 +73,7 @@ export default async function RootLayout({ children }: { children: React.ReactNo
             ) : (
               <SidebarMenu>
                 <SidebarMenuItem>
-              <SidebarMenuButton render={<a href={cookie ? "/logout" : "/login"} />} size="lg" tooltip={cookie ? "Reset sign-in" : "Sign in"}>
+              <SidebarMenuButton render={<a href="/login" />} size="lg" tooltip={cookie ? "Reset sign-in" : "Sign in"}>
                 <Avatar className="profile-avatar profile-avatar-quiet" aria-hidden="true"><AvatarFallback>H</AvatarFallback></Avatar>
                 <span>{cookie ? "Reset sign-in" : "Sign in"}</span>
               </SidebarMenuButton>
@@ -98,7 +99,7 @@ export default async function RootLayout({ children }: { children: React.ReactNo
             <SidebarFooter>
               <SidebarMenu>
                 {viewer?.is_admin && <SidebarMenuItem><SidebarMenuButton render={<a href="/admin" />} tooltip="Admin"><ShieldCheck /><span>Admin</span></SidebarMenuButton></SidebarMenuItem>}
-                <SidebarMenuItem><SidebarMenuButton render={<a href={name ? "/logout" : cookie ? "/logout" : "/login"} />} tooltip={name ? "Sign out" : cookie ? "Reset sign-in" : "Sign in"}><LogOut /><span>{name ? "Sign out" : cookie ? "Reset sign-in" : "Sign in"}</span></SidebarMenuButton></SidebarMenuItem>
+                <SidebarMenuItem>{name ? <form action="/logout" method="post"><SidebarMenuButton type="submit" tooltip="Sign out"><LogOut /><span>Sign out</span></SidebarMenuButton></form> : <SidebarMenuButton render={<a href="/login" />} tooltip={cookie ? "Reset sign-in" : "Sign in"}><LogOut /><span>{cookie ? "Reset sign-in" : "Sign in"}</span></SidebarMenuButton>}</SidebarMenuItem>
               </SidebarMenu>
             </SidebarFooter>
           </Sidebar>

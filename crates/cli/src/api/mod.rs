@@ -6,7 +6,7 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::fs;
-use std::io;
+use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -31,6 +31,11 @@ pub struct SyncPayload {
     pub prompt_metrics: Vec<Value>,
     /// Stripped harness events; never includes prompt text.
     pub prompt_events: Vec<Value>,
+    /// SHA-256 digests only. Raw hardware identifiers never leave the device.
+    #[serde(default)]
+    pub hardware_hashes: BTreeMap<String, String>,
+    #[serde(default = "environment_class")]
+    pub environment_class: String,
 }
 
 #[derive(Debug, Default)]
@@ -96,13 +101,25 @@ pub fn api_request(
         .send()
         .map_err(|error| io::Error::other(format!("API request failed: {error}")))?;
     let status = response.status();
-    let text = response
-        .text()
+    const MAX_RESPONSE_BYTES: u64 = 1_048_576;
+    if response
+        .content_length()
+        .is_some_and(|length| length > MAX_RESPONSE_BYTES)
+    {
+        return Err(io::Error::other("API response exceeds size limit"));
+    }
+    let mut text = String::new();
+    response
+        .take(MAX_RESPONSE_BYTES + 1)
+        .read_to_string(&mut text)
         .map_err(|error| io::Error::other(format!("invalid API response: {error}")))?;
+    if text.len() as u64 > MAX_RESPONSE_BYTES {
+        return Err(io::Error::other("API response exceeds size limit"));
+    }
     let value: Value = serde_json::from_str(&text).unwrap_or(Value::String(text));
     if !status.is_success() {
         return Err(io::Error::other(format!(
-            "API request failed: HTTP {status}: {value}"
+            "API request failed: HTTP {status}"
         )));
     }
     Ok(value)
@@ -129,7 +146,106 @@ pub fn build_sync_payload(repo_root: &Path) -> io::Result<SyncPayload> {
         episodes,
         prompt_metrics,
         prompt_events,
+        hardware_hashes: hardware_hashes(),
+        environment_class: environment_class(),
     })
+}
+
+fn sha256_hex(value: &str) -> String {
+    format!("{:x}", Sha256::digest(value.as_bytes()))
+}
+
+fn command_output(program: &str, args: &[&str]) -> Option<String> {
+    let output = std::process::Command::new(program)
+        .args(args)
+        .output()
+        .ok()?;
+    output
+        .status
+        .success()
+        .then(|| String::from_utf8_lossy(&output.stdout).trim().to_owned())
+        .filter(|value| !value.is_empty())
+}
+
+/// Collect machine identifiers locally and immediately hash each value. The
+/// returned map contains no raw serial number, asset tag, or fingerprint.
+fn hardware_hashes() -> BTreeMap<String, String> {
+    let mut raw = BTreeMap::new();
+    #[cfg(target_os = "macos")]
+    {
+        if let Some(value) = command_output("ioreg", &["-rd1", "-c", "IOPlatformExpertDevice"]) {
+            for (label, key) in [
+                ("fingerprint", "IOPlatformUUID"),
+                ("serial_number", "IOPlatformSerialNumber"),
+            ] {
+                if let Some(value) = value
+                    .lines()
+                    .find(|line| line.contains(key))
+                    .and_then(|line| line.split('"').nth(3))
+                {
+                    raw.insert(label, value.to_owned());
+                }
+            }
+        }
+    }
+    #[cfg(target_os = "linux")]
+    {
+        for (label, path) in [
+            ("fingerprint", "/etc/machine-id"),
+            ("serial_number", "/sys/class/dmi/id/product_serial"),
+            ("asset_tag", "/sys/class/dmi/id/chassis_asset_tag"),
+        ] {
+            if let Ok(value) = fs::read_to_string(path) {
+                let value = value.trim();
+                if !value.is_empty() {
+                    raw.insert(label, value.to_owned());
+                }
+            }
+        }
+    }
+    #[cfg(target_os = "windows")]
+    {
+        if let Some(value) = command_output("wmic", &["csproduct", "get", "uuid", "/value"]) {
+            if let Some(value) = value.lines().find_map(|line| line.strip_prefix("UUID=")) {
+                raw.insert("fingerprint", value.to_owned());
+            }
+        }
+    }
+    raw.into_iter()
+        .map(|(label, value)| (label.to_owned(), sha256_hex(&value)))
+        .collect()
+}
+
+fn environment_class() -> String {
+    #[cfg(target_os = "linux")]
+    {
+        if std::env::var_os("WSL_INTEROP").is_some()
+            || fs::read_to_string("/proc/version")
+                .is_ok_and(|v| v.to_ascii_lowercase().contains("microsoft"))
+        {
+            return "wsl".to_owned();
+        }
+        if std::path::Path::new("/.dockerenv").exists()
+            || fs::read_to_string("/proc/1/cgroup")
+                .is_ok_and(|v| v.contains("docker") || v.contains("kubepods"))
+        {
+            return "container".to_owned();
+        }
+        if fs::read_to_string("/sys/class/dmi/id/sys_vendor").is_ok_and(|v| {
+            let v = v.to_ascii_lowercase();
+            v.contains("vmware")
+                || v.contains("virtualbox")
+                || v.contains("qemu")
+                || v.contains("microsoft")
+        }) {
+            return "vm".to_owned();
+        }
+    }
+    #[cfg(target_os = "macos")]
+    if std::env::var_os("CODESPACES").is_some() {
+        return "cloud_dev_env".to_owned();
+    }
+    "physical".to_owned()
 }
 
 fn cli_release_sha256() -> io::Result<String> {
@@ -347,9 +463,13 @@ pub async fn api_cli_pair(server_url: &str) -> io::Result<Value> {
 }
 
 pub async fn api_cli_pair_status(server_url: &str, device_code: &str) -> io::Result<Value> {
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(15))
+        .build()
+        .map_err(io::Error::other)?;
     let resp = client
-        .get(format!("{server_url}/api/v1/cli/pairings/{device_code}"))
+        .post(format!("{server_url}/api/v1/cli/pairings/status"))
+        .json(&json!({ "device_code": device_code }))
         .send()
         .await
         .map_err(|e| io::Error::other(format!("request failed: {e}")))?;

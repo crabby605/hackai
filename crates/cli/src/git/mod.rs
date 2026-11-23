@@ -15,7 +15,7 @@ pub fn git_remote_url(repo_root: &Path) -> io::Result<String> {
             "origin",
         ])
         .output()
-        .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("git remote: {e}")))?;
+        .map_err(|e| io::Error::other(format!("git remote: {e}")))?;
     if output.status.success() {
         Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
     } else {
@@ -37,7 +37,7 @@ pub fn git_head_sha(repo_root: &Path) -> io::Result<String> {
             "HEAD",
         ])
         .output()
-        .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("git rev-parse: {e}")))?;
+        .map_err(|e| io::Error::other(format!("git rev-parse: {e}")))?;
     if output.status.success() {
         Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
     } else {

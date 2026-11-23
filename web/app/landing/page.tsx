@@ -12,10 +12,10 @@ export default function LandingPage() {
       </p>
       <div className="hero-actions">
         <a className={cn(buttonVariants({ size: "lg" }))} href="/login">
-          Start tracking <span>→</span>
+          Start tracking
         </a>
         <a className={cn(buttonVariants({ variant: "outline", size: "lg" }))} href="/">
-          See your dashboard <span>→</span>
+          See your dashboard
         </a>
       </div>
       <div className="principles">

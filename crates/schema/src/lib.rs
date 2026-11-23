@@ -30,9 +30,17 @@ pub enum ActorRole {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum EventSource {
     ClaudeCode,
+    Codex,
+    OpenCode,
+    Gemini,
+    Aider,
+    QwenCode,
+    KimiCode,
+    ZCode,
+    Copilot,
     ManualCli,
 }
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
 pub enum ToolClass {
     Shell,
     FileRead,
@@ -210,6 +218,99 @@ pub struct PromptFeatures {
     pub is_hypothesis: bool,
     #[serde(default)]
     pub is_low_effort: bool,
+}
+
+/// Privacy-safe, closed vocabulary for a human turn.  The raw prompt belongs
+/// only in the local evidence store; exports carry this value and its derived
+/// features instead.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UserAct {
+    Specify,
+    Nudge,
+    ReportFailure,
+    Steer,
+    Decide,
+    Approve,
+    RejectOrRevert,
+    Interrupt,
+    AskToUnderstand,
+    Meta,
+}
+
+/// Grounded context attached to a failure report.  `false, false, false` is
+/// deliberately the only definition of a contextless report.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+pub struct FailureContext {
+    pub evidence: bool,
+    pub expectation: bool,
+    pub location: bool,
+}
+
+impl FailureContext {
+    pub const fn is_contextless(self) -> bool {
+        !self.evidence && !self.expectation && !self.location
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VerificationState {
+    Green,
+    Red,
+    Unverified,
+    NotApplicable,
+}
+
+/// State of the preceding agent turn.  Implementations should derive these
+/// from tool traces and verification before considering the agent's text.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentState {
+    Asked,
+    Planned,
+    Explained,
+    EditedGreen,
+    EditedRed,
+    EditedUnverified,
+    ClaimedDoneUnverified,
+    ToolError,
+    Blocked,
+    Looping,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InformationBucket {
+    None,
+    Low,
+    Medium,
+    High,
+}
+
+/// A redaction-safe record of a dialogue transition.  IDs point to local
+/// evidence events; no prompt or reply text is present here.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct DialogueTurn {
+    pub event_id: EventId,
+    pub reply_to: Option<EventId>,
+    pub episode_id: String,
+    pub rule_version: u16,
+    pub user_act: UserAct,
+    /// Confidence in permille, never a score.
+    pub act_confidence_permille: u16,
+    pub context: FailureContext,
+    pub new_information: InformationBucket,
+    pub prompt_length_bucket: u8,
+    pub fullcaps: bool,
+    pub repeat_distance_bucket: u8,
+    pub answers_question: bool,
+    pub latency_bucket: u8,
+    pub agent_state: AgentState,
+    pub verification: VerificationState,
+    pub files_changed_bucket: u8,
+    pub tool_errors: u16,
+    pub reason_codes: Vec<String>,
 }
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ToolFeatures {

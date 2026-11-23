@@ -5,10 +5,10 @@
 //! POST /api/v1/cli/pairings        — CLI creates a short-lived pairing, no auth.
 //! POST /api/v1/cli/pairings/complete — browser session approves a user_code and
 //!                                        an installation token (api_keys) is created.
-//! GET /api/v1/cli/pairings/:code   — CLI polls; the plaintext token is returned once.
+//! POST /api/v1/cli/pairings/status — CLI polls with its device secret in the body.
 
 use axum::{
-    extract::{Path, State},
+    extract::State,
     http::{HeaderMap, StatusCode},
     response::Json,
     routing::{get, post},
@@ -31,13 +31,18 @@ pub fn routes() -> axum::Router<AppState> {
     axum::Router::new()
         .route("/api/v1/cli/pairings", post(create_pairing))
         .route("/api/v1/cli/pairings/complete", post(complete_pairing))
-        .route("/api/v1/cli/pairings/{code}", get(pairing_status))
+        .route("/api/v1/cli/pairings/status", post(pairing_status))
         .route("/api/v1/me/api-key", get(api_key).post(rotate_api_key))
 }
 
 #[derive(Deserialize)]
 pub struct CompleteBody {
     pub code: String,
+}
+
+#[derive(Deserialize)]
+pub struct PairingStatusBody {
+    pub device_code: String,
 }
 
 fn now_secs() -> i64 {
@@ -170,8 +175,16 @@ async fn complete_pairing(
 
 async fn pairing_status(
     State(state): State<AppState>,
-    Path(code): Path<String>,
+    Json(body): Json<PairingStatusBody>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
+    let code = body.device_code.trim();
+    if code.len() != 36
+        || !code
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() || byte == b'-')
+    {
+        return Err(StatusCode::UNPROCESSABLE_ENTITY);
+    }
     // Deliver the freshly-issued token idempotently during this pairing window.
     // A second poll can happen when a terminal is restarted or two CLI loops
     // overlap; losing the token would strand an otherwise approved login.
@@ -180,7 +193,7 @@ async fn pairing_status(
          WHERE device_code = $1 AND token IS NOT NULL \
          RETURNING token",
     )
-    .bind(&code)
+    .bind(code)
     .fetch_optional(&state.db)
     .await
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
@@ -196,7 +209,7 @@ async fn pairing_status(
     let row = sqlx::query(
         "SELECT CASE WHEN status = 'pending' AND expires_at <= now() THEN 'expired' ELSE status END AS status FROM cli_pairings WHERE device_code = $1",
     )
-    .bind(&code)
+    .bind(code)
     .fetch_optional(&state.db)
     .await
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?

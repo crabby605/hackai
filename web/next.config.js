@@ -1,13 +1,15 @@
 /** @type {import('next').NextConfig} */
+const apiUrl = process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:3000"
+
 const nextConfig = {
   reactStrictMode: true,
   output: "standalone",
   async rewrites() {
     return [
-      { source: "/auth/:path*", destination: "http://127.0.0.1:3000/auth/:path*" },
-      { source: "/callback", destination: "http://127.0.0.1:3000/callback" },
-      { source: "/healthz", destination: "http://127.0.0.1:3000/healthz" },
-      { source: "/api/:path*", destination: "http://127.0.0.1:3000/api/:path*" },
+      { source: "/auth/:path*", destination: `${apiUrl}/auth/:path*` },
+      { source: "/callback", destination: `${apiUrl}/callback` },
+      { source: "/healthz", destination: `${apiUrl}/healthz` },
+      { source: "/api/:path*", destination: `${apiUrl}/api/:path*` },
     ]
   },
 }

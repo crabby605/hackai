@@ -10,9 +10,6 @@ hackai.crabby605.hackclub.app {
 	handle /callback {
 		reverse_proxy 127.0.0.1:3000
 	}
-	handle /cli/* {
-		reverse_proxy 127.0.0.1:3000
-	}
 	handle /healthz {
 		reverse_proxy 127.0.0.1:3000
 	}

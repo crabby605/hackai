@@ -1,0 +1,21 @@
+{$DOMAIN} {
+    encode gzip
+    handle /api/* {
+        reverse_proxy api:3000
+    }
+    handle /auth/* {
+        reverse_proxy api:3000
+    }
+    handle /callback {
+        reverse_proxy api:3000
+    }
+    handle /healthz {
+        reverse_proxy api:3000
+    }
+    handle /v1/* {
+        reverse_proxy api:3000
+    }
+    handle {
+        reverse_proxy web:3001
+    }
+}

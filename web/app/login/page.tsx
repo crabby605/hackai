@@ -44,7 +44,7 @@ export default async function LoginPage({
       >
         Continue <span>→</span>
       </Button>
-      {sessionExpired && <ExpiredRedirect continueUrl={continueUrl} />}
+      {sessionExpired && !error && <ExpiredRedirect continueUrl={continueUrl} />}
       {error && <p style={{ color: "var(--danger)", fontSize: "0.8rem", marginTop: "1rem" }}>
         Sign-in did not complete. Reference: <code>{error}</code>{utm_source && utm_medium ? ` (${utm_source}/${utm_medium})` : ""}.
       </p>}
