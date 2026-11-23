@@ -664,7 +664,7 @@ pub struct DashboardInsights {
 async fn first_text(
     db: &sqlx::Pool<sqlx::Postgres>,
     user_id: i64,
-    sql: &str,
+    sql: &'static str,
 ) -> Result<Option<String>, StatusCode> {
     Ok(sqlx::query(sql)
         .bind(user_id)
@@ -677,7 +677,7 @@ async fn first_text(
 async fn first_i64(
     db: &sqlx::Pool<sqlx::Postgres>,
     user_id: i64,
-    sql: &str,
+    sql: &'static str,
 ) -> Result<Option<i64>, StatusCode> {
     Ok(sqlx::query(sql)
         .bind(user_id)

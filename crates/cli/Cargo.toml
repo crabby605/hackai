@@ -26,6 +26,6 @@ keyring = "4.2"
 uuid = { version = "1.8", features = ["serde", "v4"] }
 tokio = { version = "1.38", features = ["rt", "macros"] }
 sha2 = "0.10"
-rusqlite = { version = "0.32", features = ["bundled"] }
+rusqlite = { version = "0.34", default-features = false }
 [lints]
 workspace = true
