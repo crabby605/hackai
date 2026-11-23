@@ -16,8 +16,14 @@ use sqlx::Row;
 use crate::AppState;
 
 // This value is deployed with the server, not accepted from the client.
-const ANNOTATION_POLICY_SHA256: &str =
-    "ac36dc69ffb032a0a86c0c2123bfdb20df1dcdbe8e7080980f03116e6c4c169d";
+// Can be overridden via ANNOTATION_POLICY_SHA256 env var.
+fn annotation_policy_sha256() -> &'static str {
+    static SHA: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    SHA.get_or_init(|| {
+        std::env::var("ANNOTATION_POLICY_SHA256")
+            .unwrap_or_else(|_| "ac36dc69ffb032a0a86c0c2123bfdb20df1dcdbe8e7080980f03116e6c4c169d".to_string())
+    })
+}
 
 #[derive(Deserialize)]
 pub struct SyncRequest {
@@ -212,7 +218,7 @@ async fn sync(
         .adapter_sha256
         .values()
         .all(|hash| hash.len() == 64 && hash.bytes().all(|byte| byte.is_ascii_hexdigit()));
-    let tampered_request = req.annotation_policy_sha256 != ANNOTATION_POLICY_SHA256
+    let tampered_request = req.annotation_policy_sha256 != annotation_policy_sha256()
         || !trusted_release
         || !adapter_hashes_valid;
 
@@ -240,12 +246,25 @@ async fn sync(
                 .await
                 .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
         if banned {
-            let _ =
-                sqlx::query("UPDATE users SET banned = TRUE, banned_until = NULL WHERE id = $1")
-                    .bind(user_id)
-                    .execute(&state.db)
-                    .await;
-            return Err(StatusCode::FORBIDDEN);
+            // Flag for review instead of instant ban - create a review case
+            let cluster_key = format!("hardware-ban:{hash}");
+            let cluster_id: i64 = sqlx::query_scalar(
+                "INSERT INTO review_clusters (cluster_key) VALUES ($1) ON CONFLICT (cluster_key) DO UPDATE SET updated_at = now() RETURNING id"
+            )
+                .bind(&cluster_key)
+                .fetch_one(&state.db)
+                .await
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+            let dedupe_key = format!("hardware-ban:{user_id}:{hash}");
+            let _ = sqlx::query(
+                "INSERT INTO review_cases (cluster_id, subject_user_id, dedupe_key, priority, summary) VALUES ($1, $2, $3, 5, 'User hardware hash matches banned hash') ON CONFLICT (dedupe_key) DO UPDATE SET updated_at = now()"
+            )
+                .bind(cluster_id)
+                .bind(user_id)
+                .bind(&dedupe_key)
+                .execute(&state.db)
+                .await;
+            // Don't auto-ban, just flag for review
         }
     }
     for (kind, hash) in &req.hardware_hashes {
@@ -342,11 +361,10 @@ async fn sync(
 
     // Idempotent on batch hash: a batch already applied for this user is skipped
     // wholesale so retries never duplicate episodes or double-count credit.
-    // ponytail: check-then-insert race under concurrent identical-batch retries
-    // (no unique constraint on batch_id); upgrade with a processed_batches table.
+    // Uses processed_batches table with unique constraint to avoid race conditions.
     if let Some(batch_id) = &req.batch_id {
-        let already: Option<(i64,)> = sqlx::query_as(
-            "SELECT id FROM productive_episodes WHERE user_id = $1 AND batch_id = $2 LIMIT 1",
+        let already = sqlx::query(
+            "INSERT INTO processed_batches (user_id, batch_id) VALUES ($1, $2) ON CONFLICT (user_id, batch_id) DO NOTHING RETURNING id"
         )
         .bind(user_id)
         .bind(batch_id)
@@ -387,8 +405,7 @@ async fn sync(
     // Sync annotations
     let mut annotations_synced: i64 = 0;
     for ann in &req.annotations {
-        if !["debugging", "guided", "delegated", "reading", "exploring"]
-            .contains(&ann.label.as_str())
+        if !crate::annotations::VALID_LABELS.contains(&ann.label.as_str())
             || !safe_metadata(&ann.session_key, 128)
             || !safe_metadata(&ann.evidence, 1_024)
         {

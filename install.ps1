@@ -1,7 +1,7 @@
 # HackAI Windows installer
 # Usage: iwr https://raw.githubusercontent.com/hackclub/hackai/main/install.ps1 | iex
 
-$repo = "hackclub/hackai"
+$repo = "crabby605/hackai"
 $binary = "hackai.exe"
 
 $arch = $env:PROCESSOR_ARCHITECTURE

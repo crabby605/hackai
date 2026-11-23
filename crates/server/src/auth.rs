@@ -128,7 +128,12 @@ impl AuthState {
             .unwrap_or_else(|_| "http://localhost:3000/callback".to_string());
         let session_cookie_domain = std::env::var("SESSION_COOKIE_DOMAIN")
             .ok()
-            .filter(|domain| !domain.trim().is_empty());
+            .filter(|domain| !domain.trim().is_empty())
+            .filter(|domain| {
+                // Only allow valid domain names, not malicious injection
+                domain.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-')
+                    && !domain.starts_with('.')
+            });
 
         let discovery: OidcDiscovery = self_client()
             .get(format!("{issuer}/.well-known/openid-configuration"))

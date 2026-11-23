@@ -14,8 +14,8 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  build:
-    name: Build ${{ matrix.target }}
+  build-cli:
+    name: Build CLI ${{ matrix.target }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -91,10 +91,44 @@ jobs:
           name: ${{ matrix.artifact }}
           path: dist/*
 
+  build-web:
+    name: Build Web
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ./web
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build
+        run: npm run build
+
+      - name: Prepare web artifact
+        run: |
+          mkdir -p ../dist
+          cp -r .next/standalone ../dist/web
+          cp -r public ../dist/web/ 2>/dev/null || true
+
+      - name: Upload web artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: web
+          path: dist/web/*
+
   release:
     name: Create Release
     runs-on: ubuntu-latest
-    needs: build
+    needs: [build-cli, build-web]
     if: startsWith(github.ref, 'refs/tags/v')
     permissions:
       contents: write
@@ -136,7 +170,7 @@ jobs:
           #!/bin/bash
           set -euo pipefail
 
-          REPO="hackclub/hackai"
+          REPO="crabby605/hackai"
           BINARY="hackai"
 
           # Detect OS and architecture
@@ -207,7 +241,7 @@ jobs:
 
           cat > install.ps1 << 'EOF'
           # PowerShell install script for Windows
-          $repo = "hackclub/hackai"
+          $repo = "crabby605/hackai"
           $binary = "hackai.exe"
 
           $arch = $env:PROCESSOR_ARCHITECTURE

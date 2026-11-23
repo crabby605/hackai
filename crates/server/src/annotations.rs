@@ -16,7 +16,7 @@ use sqlx::Row;
 
 use crate::AppState;
 
-const VALID_LABELS: &[&str] = &["debugging", "guided", "delegated", "reading", "exploring"];
+pub const VALID_LABELS: &[&str] = &["debugging", "guided", "delegated", "reading", "exploring"];
 
 #[derive(Deserialize)]
 pub struct AnnotateRequest {

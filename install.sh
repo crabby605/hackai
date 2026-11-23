@@ -4,7 +4,7 @@
 
 set -euo pipefail
 
-REPO="hackclub/hackai"
+REPO="crabby605/hackai"
 BINARY="hackai"
 
 # Detect OS and architecture

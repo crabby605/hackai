@@ -176,7 +176,7 @@ fn analyze_agent_reply(
 ) -> (bool, bool, bool, bool, u16, bool) {
     let mut had_plan = false;
     let mut had_explanation = false;
-    let asked_question = false;
+    let mut asked_question = false;
     let mut tool_error_count = 0u16;
     let mut saw_tool_result = false;
 
@@ -200,7 +200,21 @@ fn analyze_agent_reply(
         // Annotation events may carry agent text summaries
         if event.kind == EventKind::Annotation {
             had_explanation = true;
+            // Check if agent asked a question (annotation text ends with ?)
+            // We can't access raw text, but we can infer from the event structure
+            // If the annotation is the last agent event and contains question indicators
         }
+    }
+
+    // Detect if agent asked a question by checking the last agent annotation
+    // We check if the last agent event was an annotation and the one before that was a tool result
+    let agent_events: Vec<_> = events.iter().filter(|e| e.role == ActorRole::Agent).collect();
+    if let Some(last_agent) = agent_events.last()
+        && last_agent.kind == EventKind::Annotation
+    {
+        // If the agent's last action was an annotation (not a tool),
+        // it likely means they were responding/asking rather than acting
+        asked_question = true;
     }
 
     // Detect looping: same tool class failing repeatedly
