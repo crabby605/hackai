@@ -464,7 +464,9 @@ fn simhash64(prompt: Option<&hackai_schema::PromptFeatures>) -> Option<u64> {
     hasher.update([features.is_low_effort as u8]);
     let digest = hasher.finalize();
     #[allow(clippy::expect_used)]
-    Some(u64::from_le_bytes(<[u8; 8]>::try_from(&digest[..8]).expect("digest is 32 bytes")))
+    Some(u64::from_le_bytes(
+        <[u8; 8]>::try_from(&digest[..8]).expect("digest is 32 bytes"),
+    ))
 }
 
 /// Bucket the SimHash distance to previous prompt.
