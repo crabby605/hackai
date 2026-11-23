@@ -1,0 +1,260 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  packages: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            artifact: hackai-linux-x86_64
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+            artifact: hackai-linux-aarch64
+            cross: true
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            artifact: hackai-macos-x86_64
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            artifact: hackai-macos-aarch64
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            artifact: hackai-windows-x86_64.exe
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install cross (for cross-compilation)
+        if: matrix.cross
+        uses: taiki-e/install-action@cross
+
+      - name: Install system dependencies (Linux)
+        if: runner.os == 'Linux' && !matrix.cross
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libssl-dev pkg-config libsqlite3-dev
+
+      - name: Install system dependencies (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew install openssl sqlite3
+
+      - name: Build CLI
+        run: |
+          if [ "${{ matrix.cross }}" = "true" ]; then
+            cross build --release --target ${{ matrix.target }} -p hackai
+          else
+            cargo build --release --target ${{ matrix.target }} -p hackai
+          fi
+
+      - name: Build server (Linux only)
+        if: runner.os == 'Linux' && !matrix.cross
+        run: |
+          cargo build --release --target ${{ matrix.target }} -p hackai-server
+
+      - name: Prepare artifacts
+        run: |
+          mkdir -p dist
+          cp target/${{ matrix.target }}/release/hackai${{ matrix.target }} dist/${{ matrix.artifact }} 2>/dev/null || \
+          cp target/${{ matrix.target }}/release/hackai.exe dist/${{ matrix.artifact }} 2>/dev/null || true
+
+          if [ "${{ runner.os }}" = "Linux" ] && [ "${{ matrix.cross }}" != "true" ]; then
+            cp target/${{ matrix.target }}/release/hackai-server dist/hackai-server-${{ matrix.target }} || true
+          fi
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: dist/*
+
+  release:
+    name: Create Release
+    runs-on: ubuntu-latest
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: write
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Create checksums
+        run: |
+          cd dist
+          sha256sum * > checksums.txt
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: |
+            dist/*
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  publish-installer:
+    name: Publish Install Script
+    runs-on: ubuntu-latest
+    needs: release
+    if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Create install script
+        run: |
+          cat > install.sh << 'EOF'
+          #!/bin/bash
+          set -euo pipefail
+
+          REPO="hackclub/hackai"
+          BINARY="hackai"
+
+          # Detect OS and architecture
+          OS=$(uname -s | tr '[:upper:]' '[:lower:]')
+          ARCH=$(uname -m)
+
+          case "$OS" in
+            linux)
+              case "$ARCH" in
+                x86_64) TARGET="x86_64-unknown-linux-gnu" ;;
+                aarch64|arm64) TARGET="aarch64-unknown-linux-gnu" ;;
+                *) echo "Unsupported architecture: $ARCH"; exit 1 ;;
+              esac
+              ;;
+            darwin)
+              case "$ARCH" in
+                x86_64) TARGET="x86_64-apple-darwin" ;;
+                arm64) TARGET="aarch64-apple-darwin" ;;
+                *) echo "Unsupported architecture: $ARCH"; exit 1 ;;
+              esac
+              ;;
+            *)
+              echo "Unsupported OS: $OS"
+              exit 1
+              ;;
+          esac
+
+          # Get latest release version
+          VERSION=$(curl -s "https://api.github.com/repos/$REPO/releases/latest" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
+          if [ -z "$VERSION" ]; then
+            echo "Failed to fetch latest version"
+            exit 1
+          fi
+
+          URL="https://github.com/$REPO/releases/download/$VERSION/hackai-$TARGET"
+          if [ "$OS" = "windows" ]; then
+            URL="${URL}.exe"
+          fi
+
+          echo "Installing $BINARY $VERSION for $TARGET..."
+
+          # Create temp directory
+          TMPDIR=$(mktemp -d)
+          trap 'rm -rf "$TMPDIR"' EXIT
+
+          # Download binary
+          curl -fsSL "$URL" -o "$TMPDIR/$BINARY"
+          chmod +x "$TMPDIR/$BINARY"
+
+          # Install to ~/.local/bin (or /usr/local/bin if root)
+          INSTALL_DIR="${HOME}/.local/bin"
+          if [ "$(id -u)" = "0" ]; then
+            INSTALL_DIR="/usr/local/bin"
+          fi
+          mkdir -p "$INSTALL_DIR"
+          mv "$TMPDIR/$BINARY" "$INSTALL_DIR/$BINARY"
+
+          # Add to PATH if needed
+          case ":$PATH:" in
+            *":$INSTALL_DIR:"*) ;;
+            *) echo "Add $INSTALL_DIR to your PATH to use $BINARY" ;;
+          esac
+
+          echo "Installed $BINARY to $INSTALL_DIR"
+          echo "Run 'hackai --help' to get started"
+          EOF
+          chmod +x install.sh
+
+          cat > install.ps1 << 'EOF'
+          # PowerShell install script for Windows
+          $repo = "hackclub/hackai"
+          $binary = "hackai.exe"
+
+          $arch = $env:PROCESSOR_ARCHITECTURE
+          if ($arch -eq "AMD64") { $target = "x86_64-pc-windows-msvc" }
+          elseif ($arch -eq "ARM64") { $target = "aarch64-pc-windows-msvc" }
+          else { Write-Error "Unsupported architecture: $arch"; exit 1 }
+
+          $version = (Invoke-RestMethod "https://api.github.com/repos/$repo/releases/latest").tag_name
+          if (-not $version) { Write-Error "Failed to fetch latest version"; exit 1 }
+
+          $url = "https://github.com/$repo/releases/download/$version/hackai-$target.exe"
+          Write-Host "Installing $binary $version for $target..."
+
+          $tmpDir = [System.IO.Path]::GetTempPath()
+          $tmpFile = Join-Path $tmpDir $binary
+
+          Invoke-WebRequest -Uri $url -OutFile $tmpFile
+
+          $installDir = if ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator) {
+            "C:\Program Files\$binary"
+          } else {
+            "$env:USERPROFILE\.local\bin"
+          }
+
+          if (-not (Test-Path $installDir)) { New-Item -ItemType Directory -Force -Path $installDir }
+          Move-Item $tmpFile -Destination (Join-Path $installDir $binary) -Force
+
+          $env:PATH = "$installDir;$env:PATH"
+          [Environment]::SetEnvironmentVariable("PATH", $env:PATH, "User")
+
+          Write-Host "Installed $binary to $installDir"
+          Write-Host "Run 'hackai --help' to get started"
+          EOF
+
+      - name: Upload install scripts
+        uses: actions/upload-artifact@v4
+        with:
+          name: install-scripts
+          path: |
+            install.sh
+            install.ps1
+
+      - name: Attach install scripts to release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: |
+            install.sh
+            install.ps1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
