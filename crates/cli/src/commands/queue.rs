@@ -1,5 +1,5 @@
-use crate::{read_stored_token, state};
 use crate::commands::queue_process::process_queue;
+use crate::{read_stored_token, state};
 use std::{io, path::Path};
 
 pub fn cmd_queue_list(repo: &Path) -> io::Result<()> {

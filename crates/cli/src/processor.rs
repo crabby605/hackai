@@ -171,10 +171,12 @@ fn read_latest_timestamp(root: &Path) -> io::Result<i64> {
 
 /// Build a minimal agent reply summary for context detection.
 /// Returns (had_plan, had_explanation, asked_question, claimed_done, tool_error_count, loop_signals)
-fn analyze_agent_reply(events: &[&NormalizedEvent<String, String>]) -> (bool, bool, bool, bool, u16, bool) {
+fn analyze_agent_reply(
+    events: &[&NormalizedEvent<String, String>],
+) -> (bool, bool, bool, bool, u16, bool) {
     let mut had_plan = false;
     let mut had_explanation = false;
-    let mut asked_question = false;
+    let asked_question = false;
     let mut tool_error_count = 0u16;
     let mut saw_tool_result = false;
 
@@ -185,7 +187,10 @@ fn analyze_agent_reply(events: &[&NormalizedEvent<String, String>]) -> (bool, bo
                 // Many harnesses use "Other" for TodoWrite, planning tools
                 had_plan = true;
             }
-            if matches!(tool.class, ToolClass::Test | ToolClass::Build | ToolClass::Lint) {
+            if matches!(
+                tool.class,
+                ToolClass::Test | ToolClass::Build | ToolClass::Lint
+            ) {
                 saw_tool_result = true;
                 if tool.exit_code.is_some_and(|c| c != 0) {
                     tool_error_count = tool_error_count.saturating_add(1);
@@ -202,7 +207,10 @@ fn analyze_agent_reply(events: &[&NormalizedEvent<String, String>]) -> (bool, bo
     let mut tool_class_counts: HashMap<ToolClass, u16> = HashMap::new();
     for event in events {
         if let Some(tool) = &event.tool
-            && matches!(tool.class, ToolClass::Test | ToolClass::Build | ToolClass::Lint)
+            && matches!(
+                tool.class,
+                ToolClass::Test | ToolClass::Build | ToolClass::Lint
+            )
             && tool.exit_code.is_some_and(|c| c != 0)
         {
             *tool_class_counts.entry(tool.class).or_default() += 1;
@@ -215,7 +223,14 @@ fn analyze_agent_reply(events: &[&NormalizedEvent<String, String>]) -> (bool, bo
     let no_errors = tool_error_count == 0;
     let claimed_done = had_tool_activity && no_errors && saw_tool_result;
 
-    (had_plan, had_explanation, asked_question, claimed_done, tool_error_count, looping)
+    (
+        had_plan,
+        had_explanation,
+        asked_question,
+        claimed_done,
+        tool_error_count,
+        looping,
+    )
 }
 
 /// Determine agent state from tool events
@@ -269,7 +284,10 @@ fn determine_agent_state(
     let mut tool_class_fail_counts: HashMap<ToolClass, u16> = HashMap::new();
     for event in events {
         if let Some(tool) = &event.tool
-            && matches!(tool.class, ToolClass::Test | ToolClass::Build | ToolClass::Lint)
+            && matches!(
+                tool.class,
+                ToolClass::Test | ToolClass::Build | ToolClass::Lint
+            )
             && tool.exit_code.is_some_and(|c| c != 0)
         {
             *tool_class_fail_counts.entry(tool.class).or_default() += 1;
@@ -374,18 +392,21 @@ fn determine_agent_state(
 
     // Check if agent asked a question (hard without raw text)
     // Heuristic: agent turn with no tools and no edits
-    let agent_turns: Vec<_> = events.iter().filter(|e| e.role == ActorRole::Agent).collect();
-    if !agent_turns.is_empty() {
-        let last_agent = agent_turns.last().unwrap();
-        if last_agent.tool.is_none() && writes == 0 {
-            return (
-                AgentState::Asked,
-                VerificationState::NotApplicable,
-                0,
-                0,
-                vec!["AGENT_ASKED_QUESTION".into()],
-            );
-        }
+    let agent_turns: Vec<_> = events
+        .iter()
+        .filter(|e| e.role == ActorRole::Agent)
+        .collect();
+    if let Some(last_agent) = agent_turns.last()
+        && last_agent.tool.is_none()
+        && writes == 0
+    {
+        return (
+            AgentState::Asked,
+            VerificationState::NotApplicable,
+            0,
+            0,
+            vec!["AGENT_ASKED_QUESTION".into()],
+        );
     }
 
     (
@@ -442,7 +463,8 @@ fn simhash64(prompt: Option<&hackai_schema::PromptFeatures>) -> Option<u64> {
     hasher.update([features.is_hypothesis as u8]);
     hasher.update([features.is_low_effort as u8]);
     let digest = hasher.finalize();
-    Some(u64::from_le_bytes(digest[..8].try_into().unwrap()))
+    #[allow(clippy::expect_used)]
+    Some(u64::from_le_bytes(<[u8; 8]>::try_from(&digest[..8]).expect("digest is 32 bytes")))
 }
 
 /// Bucket the SimHash distance to previous prompt.
@@ -451,10 +473,10 @@ fn repeat_distance_bucket(prev_hash: Option<u64>, curr_hash: Option<u64>) -> u8 
         (Some(prev), Some(curr)) => {
             let dist = (prev ^ curr).count_ones();
             match dist {
-                0..=3 => 0,      // Near duplicate
-                4..=8 => 1,      // Similar
-                9..=16 => 2,     // Related
-                _ => 3,          // Different
+                0..=3 => 0,  // Near duplicate
+                4..=8 => 1,  // Similar
+                9..=16 => 2, // Related
+                _ => 3,      // Different
             }
         }
         _ => u8::MAX, // Unknown
@@ -468,11 +490,11 @@ fn latency_bucket(prev_agent_end_ms: Option<i64>, prompt_ms: i64) -> u8 {
     };
     let gap_ms = prompt_ms.saturating_sub(prev_end);
     match gap_ms {
-        0..=5_000 => 0,           // Immediate (<5s)
-        5_001..=30_000 => 1,      // Quick (5-30s)
-        30_001..=120_000 => 2,    // Normal (30s-2m)
-        120_001..=600_000 => 3,   // Slow (2-10m)
-        _ => 4,                   // Long (>10m)
+        0..=5_000 => 0,         // Immediate (<5s)
+        5_001..=30_000 => 1,    // Quick (5-30s)
+        30_001..=120_000 => 2,  // Normal (30s-2m)
+        120_001..=600_000 => 3, // Slow (2-10m)
+        _ => 4,                 // Long (>10m)
     }
 }
 
@@ -506,7 +528,10 @@ fn label_episode(
             // Check if there were verification signals (tests)
             let has_verification = since_prompt.iter().any(|e| {
                 e.tool.as_ref().is_some_and(|t| {
-                    matches!(t.class, ToolClass::Test | ToolClass::Build | ToolClass::Lint)
+                    matches!(
+                        t.class,
+                        ToolClass::Test | ToolClass::Build | ToolClass::Lint
+                    )
                 })
             });
             if has_verification {
@@ -521,7 +546,10 @@ fn label_episode(
             AgentState::Explained
         } else if agent_asked_question {
             AgentState::Asked
-        } else if since_prompt.iter().any(|e| e.kind == EventKind::ToolStarted) {
+        } else if since_prompt
+            .iter()
+            .any(|e| e.kind == EventKind::ToolStarted)
+        {
             AgentState::EditedUnverified
         } else {
             AgentState::Blocked
@@ -571,9 +599,16 @@ fn label_episode(
         // Latency bucket
         let latency_bucket = latency_bucket(prev_agent_end_ms, event.occurred_at.0);
         // Update prev_agent_end_ms for next turn
-        if let Some(last_agent) = since_prompt.iter().rev().find(|e| e.role == ActorRole::Agent) {
+        if let Some(last_agent) = since_prompt
+            .iter()
+            .rev()
+            .find(|e| e.role == ActorRole::Agent)
+        {
             if let Some(tool) = &last_agent.tool {
-                prev_agent_end_ms = tool.finished_at.map(|t| t.0).or(Some(last_agent.occurred_at.0));
+                prev_agent_end_ms = tool
+                    .finished_at
+                    .map(|t| t.0)
+                    .or(Some(last_agent.occurred_at.0));
             } else {
                 prev_agent_end_ms = Some(last_agent.occurred_at.0);
             }
@@ -706,6 +741,7 @@ fn confidence_for_act(act: UserAct, prompt: Option<&hackai_schema::PromptFeature
     }
 }
 
+#[allow(dead_code)] // Legacy function, replaced by determine_agent_state
 fn agent_state(
     events: &[&NormalizedEvent<String, String>],
 ) -> Option<(AgentState, VerificationState, u8, u16, Vec<String>)> {
@@ -756,7 +792,10 @@ fn agent_state(
     let mut tool_class_fail_counts: HashMap<ToolClass, u16> = HashMap::new();
     for event in events {
         if let Some(tool) = &event.tool
-            && matches!(tool.class, ToolClass::Test | ToolClass::Build | ToolClass::Lint)
+            && matches!(
+                tool.class,
+                ToolClass::Test | ToolClass::Build | ToolClass::Lint
+            )
             && tool.exit_code.is_some_and(|c| c != 0)
         {
             *tool_class_fail_counts.entry(tool.class).or_default() += 1;
@@ -861,18 +900,21 @@ fn agent_state(
 
     // Check if agent asked a question (hard without raw text)
     // Heuristic: agent turn with no tools and no edits
-    let agent_turns: Vec<_> = events.iter().filter(|e| e.role == ActorRole::Agent).collect();
-    if !agent_turns.is_empty() {
-        let last_agent = agent_turns.last().unwrap();
-        if last_agent.tool.is_none() && writes == 0 {
-            return Some((
-                AgentState::Asked,
-                VerificationState::NotApplicable,
-                0,
-                0,
-                vec!["AGENT_ASKED_QUESTION".into()],
-            ));
-        }
+    let agent_turns: Vec<_> = events
+        .iter()
+        .filter(|e| e.role == ActorRole::Agent)
+        .collect();
+    if let Some(last_agent) = agent_turns.last()
+        && last_agent.tool.is_none()
+        && writes == 0
+    {
+        return Some((
+            AgentState::Asked,
+            VerificationState::NotApplicable,
+            0,
+            0,
+            vec!["AGENT_ASKED_QUESTION".into()],
+        ));
     }
 
     None
@@ -942,7 +984,7 @@ fn episode_id(session: &str, started_at: i64) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{agent_state, information_bucket, classify_user_act, detect_failure_context};
+    use super::{agent_state, classify_user_act, detect_failure_context, information_bucket};
     use hackai_schema::{
         ActorRole, AgentState, EventId, EventKind, EventSource, NormalizedEvent, PromptFeatures,
         ToolFeatures, UnixMillis, UserAct, VerificationState,

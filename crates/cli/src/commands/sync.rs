@@ -1,5 +1,5 @@
-use crate::{api, read_stored_token, state};
 use crate::commands::queue_process::process_queue;
+use crate::{api, read_stored_token, state};
 use std::{io, path::Path};
 
 pub fn cmd_sync(repo: &Path, force: bool) -> io::Result<()> {

@@ -1,14 +1,11 @@
-use crate::{
-    state, processor,
-    TranscriptHarness,
-};
+use crate::{TranscriptHarness, processor, state};
 use hackai_parser::{
-    parse_aider_markdown, parse_claude_jsonl, parse_codex_jsonl, parse_gemini_jsonl,
-    parse_kimi_code_jsonl, parse_opencode_jsonl, parse_opencode_sqlite,
-    parse_qwen_code_jsonl, parse_z_code_jsonl, parse_copilot_jsonl,
+    parse_aider_markdown, parse_claude_jsonl, parse_codex_jsonl, parse_copilot_jsonl,
+    parse_gemini_jsonl, parse_kimi_code_jsonl, parse_opencode_jsonl, parse_opencode_sqlite,
+    parse_qwen_code_jsonl, parse_z_code_jsonl,
 };
-use hackai_scorer::TimeAccountingConfig;
 use hackai_schema::UnixMillis;
+use hackai_scorer::TimeAccountingConfig;
 use std::{fs, io, path::Path};
 
 pub fn cmd_ingest(
@@ -99,8 +96,7 @@ pub fn cmd_ingest(
         .collect::<Result<Vec<_>, _>>()
         .map_err(io::Error::other)?;
     let stored = state::append_normalized_events(&root, &values)?;
-    let accounting =
-        hackai_scorer::account_time(&events, TimeAccountingConfig::default());
+    let accounting = hackai_scorer::account_time(&events, TimeAccountingConfig::default());
     let processed = processor::process_and_write(&root)?;
     state::audit(&root, "ingest")?;
     println!(

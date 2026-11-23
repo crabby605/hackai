@@ -1,6 +1,6 @@
-use crate::{api, read_stored_token, write_stored_token, clear_stored_token, state, tokio_rt};
-use std::{io, path::Path, thread, time::Duration, sync::mpsc};
+use crate::{api, clear_stored_token, read_stored_token, state, tokio_rt, write_stored_token};
 use std::io::Write;
+use std::{io, path::Path, sync::mpsc, thread, time::Duration};
 
 pub fn cmd_login(token: Option<String>, api_key: Option<String>, _device: bool) -> io::Result<()> {
     let r = state::root(Path::new("."))?;

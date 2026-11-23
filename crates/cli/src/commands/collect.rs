@@ -1,7 +1,11 @@
-use crate::{state, TranscriptHarness};
+use crate::{TranscriptHarness, state};
 use hackai_gitx;
 use sha2::{Digest, Sha256};
-use std::{fs, io, path::Path, time::{SystemTime, UNIX_EPOCH}};
+use std::{
+    fs, io,
+    path::Path,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 fn now_unix_millis() -> io::Result<i64> {
     SystemTime::now()
@@ -46,7 +50,13 @@ pub fn cmd_collect(repo: &Path) -> io::Result<()> {
 
     for source in state::discover_claude_transcripts(&root)? {
         let session = discovered_session_name(&source);
-        match crate::commands::ingest::cmd_ingest(&root, TranscriptHarness::Claude, &source, session, None) {
+        match crate::commands::ingest::cmd_ingest(
+            &root,
+            TranscriptHarness::Claude,
+            &source,
+            session,
+            None,
+        ) {
             Ok(()) => imported_sources += 1,
             Err(error) => {
                 failures += 1;
@@ -65,7 +75,13 @@ pub fn cmd_collect(repo: &Path) -> io::Result<()> {
             continue;
         }
         let session = discovered_session_name(&source);
-        match crate::commands::ingest::cmd_ingest(&root, TranscriptHarness::Codex, &source, session, None) {
+        match crate::commands::ingest::cmd_ingest(
+            &root,
+            TranscriptHarness::Codex,
+            &source,
+            session,
+            None,
+        ) {
             Ok(()) => imported_sources += 1,
             Err(error) => {
                 failures += 1;
@@ -155,7 +171,10 @@ fn collect_git_evidence(repo: &Path, since_ms: Option<i64>) -> io::Result<()> {
         // The file count is intentionally encoded only in an opaque, derived
         // event id suffix; consumers use line totals and never receive paths.
         let mut value = serde_json::to_value(event).map_err(io::Error::other)?;
-        if let Some(change) = value.get_mut("change").and_then(serde_json::Value::as_object_mut) {
+        if let Some(change) = value
+            .get_mut("change")
+            .and_then(serde_json::Value::as_object_mut)
+        {
             change.insert(
                 "files_changed".to_owned(),
                 serde_json::json!(commit.files_changed),
@@ -201,7 +220,10 @@ fn collect_git_evidence(repo: &Path, since_ms: Option<i64>) -> io::Result<()> {
             commit: None,
         };
         let mut value = serde_json::to_value(event).map_err(io::Error::other)?;
-        if let Some(change) = value.get_mut("change").and_then(serde_json::Value::as_object_mut) {
+        if let Some(change) = value
+            .get_mut("change")
+            .and_then(serde_json::Value::as_object_mut)
+        {
             change.insert(
                 "files_changed".to_owned(),
                 serde_json::json!(worktree.files_changed),

@@ -293,9 +293,7 @@ pub fn run_mcp() -> io::Result<()> {
                             stdout.flush()?;
                             continue;
                         };
-                        match serde_json::to_string(&crate::classifier::classify_prompt(
-                            prompt,
-                        )) {
+                        match serde_json::to_string(&crate::classifier::classify_prompt(prompt)) {
                             Ok(signals) => mcp_response(
                                 id,
                                 json!({ "content": [{ "type": "text", "text": signals }] }),

@@ -112,6 +112,7 @@ pub struct FailureContextReplay {
 
 /// Episode summary for replay
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(dead_code)] // Public API for replay encoding
 pub struct EpisodeReplay {
     pub episode_id: String,
     pub started_at: i64,
@@ -129,6 +130,7 @@ pub struct EpisodeReplay {
 
 /// Full replay bundle
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(dead_code)] // Public API for replay encoding
 pub struct ReplayBundle {
     pub schema_version: u16,
     pub generated_at_unix_ms: i64,
@@ -140,6 +142,7 @@ pub struct ReplayBundle {
 }
 
 /// Convert normalized events to replay events
+#[allow(dead_code)] // Public API for replay encoding
 pub fn events_to_replay(events: &[NormalizedEvent<String, String>]) -> Vec<ReplayEvent> {
     events
         .iter()
@@ -190,6 +193,7 @@ pub fn events_to_replay(events: &[NormalizedEvent<String, String>]) -> Vec<Repla
         .collect()
 }
 
+#[allow(dead_code)] // Used by events_to_replay
 fn prompt_to_replay(p: &hackai_schema::PromptFeatures) -> PromptFeaturesReplay {
     let length_bucket = match p.char_len {
         0 => LengthBucket::Empty,
@@ -210,6 +214,7 @@ fn prompt_to_replay(p: &hackai_schema::PromptFeatures) -> PromptFeaturesReplay {
     }
 }
 
+#[allow(dead_code)] // Used by events_to_replay
 fn tool_to_replay(t: &hackai_schema::ToolFeatures) -> ToolFeaturesReplay {
     let class = match t.class {
         ToolClass::Shell => "shell",
@@ -237,6 +242,7 @@ fn tool_to_replay(t: &hackai_schema::ToolFeatures) -> ToolFeaturesReplay {
     }
 }
 
+#[allow(dead_code)] // Used by events_to_replay
 fn change_to_replay(c: &hackai_schema::ChangeFeatures) -> ChangeFeaturesReplay {
     ChangeFeaturesReplay {
         human_added: c.human_added,
@@ -247,12 +253,14 @@ fn change_to_replay(c: &hackai_schema::ChangeFeatures) -> ChangeFeaturesReplay {
     }
 }
 
+#[allow(dead_code)] // Used by events_to_replay
 fn hash_session(s: &str) -> String {
     use sha2::{Digest, Sha256};
     format!("{:x}", Sha256::digest(s.as_bytes()))
 }
 
 /// Build replay bundle from processor output
+#[allow(dead_code)] // Public API for replay encoding
 pub fn build_replay_bundle(
     processor_output: &crate::processor::ProcessorOutput,
     events: &[NormalizedEvent<String, String>],
@@ -302,6 +310,7 @@ pub fn build_replay_bundle(
     }
 }
 
+#[allow(dead_code)] // Used by build_replay_bundle
 fn dialogue_turn_to_replay(turn: &DialogueTurn) -> DialogueTurnReplay {
     let user_act = match turn.user_act {
         UserAct::Specify => "specify",

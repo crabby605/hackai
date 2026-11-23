@@ -1,29 +1,29 @@
 //! Installation and integration setup for various coding harnesses.
 
-use crate::state;
 use crate::api;
 use crate::harness::InstallScope;
+use crate::state;
 use std::{io, path::Path};
 
+#[allow(dead_code)] // Public API for installer
 pub fn install_project_hooks(repo: &Path) -> io::Result<()> {
     let r = state::root(repo)?;
     let server_url = std::env::var("HACKAI_SERVER_URL")
         .unwrap_or_else(|_| "https://hackai.crabby605.hackclub.app".into());
-    let policy = api::fetch_annotation_policy(&server_url).map_err(|error| {
-        io::Error::other(format!("could not fetch the server policy: {error}"))
-    })?;
+    let policy = api::fetch_annotation_policy(&server_url)
+        .map_err(|error| io::Error::other(format!("could not fetch the server policy: {error}")))?;
     crate::harness::install(&r, InstallScope::Project, &policy)?;
     println!("Installed HackAI hooks for this project.");
     Ok(())
 }
 
+#[allow(dead_code)] // Public API for installer
 pub fn install_global_hooks() -> io::Result<()> {
     let r = state::root(Path::new("."))?;
     let server_url = std::env::var("HACKAI_SERVER_URL")
         .unwrap_or_else(|_| "https://hackai.crabby605.hackclub.app".into());
-    let policy = api::fetch_annotation_policy(&server_url).map_err(|error| {
-        io::Error::other(format!("could not fetch the server policy: {error}"))
-    })?;
+    let policy = api::fetch_annotation_policy(&server_url)
+        .map_err(|error| io::Error::other(format!("could not fetch the server policy: {error}")))?;
     crate::harness::install(&r, InstallScope::Global, &policy)?;
     println!("Installed HackAI hooks globally.");
     Ok(())

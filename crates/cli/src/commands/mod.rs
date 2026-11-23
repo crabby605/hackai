@@ -1,11 +1,11 @@
 //! CLI command implementations grouped by domain.
 
-pub mod track;
+pub mod auth;
+pub mod collect;
 pub mod export;
 pub mod ingest;
-pub mod collect;
-pub mod auth;
-pub mod sync;
 pub mod merge;
 pub mod queue;
 pub mod queue_process;
+pub mod sync;
+pub mod track;

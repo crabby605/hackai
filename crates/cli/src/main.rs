@@ -384,14 +384,25 @@ fn cmd_watch(
     session_started_ms: Option<i64>,
     interval_seconds: u64,
 ) -> io::Result<()> {
-    crate::commands::ingest::cmd_watch(repo, harness, source, session, session_started_ms, interval_seconds)
+    crate::commands::ingest::cmd_watch(
+        repo,
+        harness,
+        source,
+        session,
+        session_started_ms,
+        interval_seconds,
+    )
 }
 
 fn cmd_collect(repo: &Path) -> io::Result<()> {
     crate::commands::collect::cmd_collect(repo)
 }
 
-fn cmd_observe(repo: &Path, since_ms: Option<i64>, interval_seconds: Option<u64>) -> io::Result<()> {
+fn cmd_observe(
+    repo: &Path,
+    since_ms: Option<i64>,
+    interval_seconds: Option<u64>,
+) -> io::Result<()> {
     crate::commands::collect::cmd_observe(repo, since_ms, interval_seconds)
 }
 
@@ -456,9 +467,8 @@ fn cmd_install(repo: &Path, global: bool) -> io::Result<()> {
     let r = state::root(repo)?;
     let server_url = std::env::var("HACKAI_SERVER_URL")
         .unwrap_or_else(|_| "https://hackai.crabby605.hackclub.app".into());
-    let policy = api::fetch_annotation_policy(&server_url).map_err(|error| {
-        io::Error::other(format!("could not fetch the server policy: {error}"))
-    })?;
+    let policy = api::fetch_annotation_policy(&server_url)
+        .map_err(|error| io::Error::other(format!("could not fetch the server policy: {error}")))?;
     crate::harness::install(
         &r,
         if global {
@@ -548,9 +558,14 @@ fn main() -> io::Result<()> {
         } => cmd_annotate(&repo, window, label, user_role, evidence, chapter_title)?,
         Command::Mcp => cmd_mcp()?,
         Command::Harness { command } => match command {
-            HarnessCommand::Install { repo } => {
-                crate::harness::install(&repo, crate::harness::InstallScope::Project, &crate::api::fetch_annotation_policy(&std::env::var("HACKAI_SERVER_URL").unwrap_or_else(|_| "https://hackai.crabby605.hackclub.app".into()))?)?
-            }
+            HarnessCommand::Install { repo } => crate::harness::install(
+                &repo,
+                crate::harness::InstallScope::Project,
+                &crate::api::fetch_annotation_policy(
+                    &std::env::var("HACKAI_SERVER_URL")
+                        .unwrap_or_else(|_| "https://hackai.crabby605.hackclub.app".into()),
+                )?,
+            )?,
             HarnessCommand::Hook {
                 repo,
                 harness,
@@ -573,9 +588,7 @@ fn main() -> io::Result<()> {
                 QueueCommand::Process => cmd_queue_process(repo)?,
             }
         }
-        Command::Purge { repo } | Command::Uninstall { repo } => {
-            cmd_purge(&repo)?
-        }
+        Command::Purge { repo } | Command::Uninstall { repo } => cmd_purge(&repo)?,
         Command::Install { repo, global } => cmd_install(&repo, global)?,
     };
     Ok(())

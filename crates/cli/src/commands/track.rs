@@ -1,4 +1,4 @@
-use crate::{api, harness, state, read_stored_token, tokio_rt};
+use crate::{api, harness, read_stored_token, state, tokio_rt};
 use dialoguer::{Confirm, Select};
 use std::{fs, io, path::Path};
 
