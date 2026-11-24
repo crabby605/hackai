@@ -21,8 +21,6 @@ const MAX_DOWNLOAD_BYTES: u64 = 50_000_000; // 50 MB
 const REQUEST_TIMEOUT_SECS: u64 = 60;
 const UPDATE_INTERVAL_SECS: u64 = 24 * 60 * 60;
 
-/// Minimal adjacent marker written by the release installer for release builds.
-const RELEASE_MARKER: &str = "hackai.release";
 /// Timestamp of the last background update check (24h gating).
 const UPDATE_STAMP: &str = ".hackai-update-stamp";
 
@@ -158,10 +156,14 @@ fn stamp_path() -> Option<PathBuf> {
         .and_then(|exe| exe.parent().map(|dir| dir.join(UPDATE_STAMP)))
 }
 
+/// Adjacent marker written by the release installer, named after the executable
+/// (e.g. `hackai.release` on Unix, `hackai.exe.release` on Windows) so the
+/// marker name matches whatever the installer actually produced per platform.
 fn release_marker_path() -> Option<PathBuf> {
-    std::env::current_exe()
-        .ok()
-        .and_then(|exe| exe.parent().map(|dir| dir.join(RELEASE_MARKER)))
+    let exe = std::env::current_exe().ok()?;
+    let dir = exe.parent()?;
+    let name = exe.file_name()?;
+    Some(dir.join(format!("{}.release", name.to_string_lossy())))
 }
 
 fn is_release_installed() -> bool {
