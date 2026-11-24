@@ -1,0 +1,1525 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "HackAI API",
+    "version": "0.1.0",
+    "description": "Time-tracking and coaching API for HackAI. Auth is via the HttpOnly `hackai_session` cookie (set after Hack Club OIDC login at `/auth/callback`) or a Bearer installation token for CLI sync/ingest endpoints."
+  },
+  "servers": [
+    { "url": "http://localhost:3000", "description": "Local development" },
+    { "url": "https://hackclub.app", "description": "Production" }
+  ],
+  "tags": [
+    { "name": "auth", "description": "Hack Club OIDC login and session callback" },
+    { "name": "user", "description": "Current user profile, API keys, dashboard" },
+    { "name": "projects", "description": "User projects" },
+    { "name": "episodes", "description": "Productive episodes and struggles" },
+    { "name": "rollups", "description": "Daily credited-time rollups" },
+    { "name": "annotations", "description": "Advisory evidence-backed annotations" },
+    { "name": "leaderboard", "description": "Public leaderboard and user profiles" },
+    { "name": "cli", "description": "CLI OAuth 2.0 device-flow pairing" },
+    { "name": "sync", "description": "CLI sync / evidence bundle upload" },
+    { "name": "evidence", "description": "Opt-in redacted evidence bundles" },
+    { "name": "coach", "description": "Privacy-safe coaching patterns" },
+    { "name": "risk", "description": "Review-only derived-evidence risk findings" },
+    { "name": "sse", "description": "Server-sent events stream" },
+    { "name": "ingest", "description": "Native / WakaTime-compatible event ingest" },
+    { "name": "policy", "description": "Public annotation policy" },
+    { "name": "admin", "description": "Admin moderation (requires `is_admin=true`)" },
+    { "name": "health", "description": "Health checks" }
+  ],
+  "paths": {
+    "/healthz": {
+      "get": {
+        "tags": ["health"],
+        "summary": "Health check",
+        "description": "Returns plain text `ok`.",
+        "responses": {
+          "200": {
+            "description": "Service operational",
+            "content": { "text/plain": { "schema": { "type": "string", "example": "ok" } } }
+          }
+        }
+      }
+    },
+    "/api/v1/health": {
+      "get": {
+        "tags": ["health"],
+        "summary": "Detailed health status",
+        "responses": {
+          "200": {
+            "description": "Health status",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "status": { "type": "string" },
+                    "version": { "type": "string" },
+                    "uptime_seconds": { "type": "integer" },
+                    "components": { "type": "object" }
+                  }
+                },
+                "example": { "status": "operational", "version": "0.1.0", "uptime_seconds": 123, "components": {} }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/auth/login": {
+      "get": {
+        "tags": ["auth"],
+        "summary": "Start Hack Club OIDC login",
+        "parameters": [
+          { "name": "continue", "in": "query", "schema": { "type": "string" }, "description": "Return path after login" }
+        ],
+        "responses": {
+          "302": { "description": "Redirect to OIDC provider" },
+          "503": { "description": "Auth not configured" }
+        }
+      }
+    },
+    "/callback": {
+      "get": {
+        "tags": ["auth"],
+        "summary": "OIDC callback (alias)",
+        "parameters": [
+          { "name": "code", "in": "query", "required": true, "schema": { "type": "string" } },
+          { "name": "state", "in": "query", "required": true, "schema": { "type": "string" } }
+        ],
+        "responses": {
+          "302": { "description": "Redirect to frontend, sets `hackai_session` cookie" },
+          "400": { "description": "OAuth state mismatch" }
+        }
+      }
+    },
+    "/auth/callback": {
+      "get": {
+        "tags": ["auth"],
+        "summary": "OIDC callback",
+        "parameters": [
+          { "name": "code", "in": "query", "required": true, "schema": { "type": "string" } },
+          { "name": "state", "in": "query", "required": true, "schema": { "type": "string" } }
+        ],
+        "responses": {
+          "302": { "description": "Redirect to frontend, sets `hackai_session` cookie" },
+          "400": { "description": "OAuth state mismatch" }
+        }
+      }
+    },
+    "/api/v1/me": {
+      "get": {
+        "tags": ["user"],
+        "summary": "Current user profile",
+        "security": [{ "SessionCookie": [] }],
+        "responses": {
+          "200": {
+            "description": "User profile",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MeResponse"
+                }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" }
+        }
+      }
+    },
+    "/api/v1/me/profile": {
+      "post": {
+        "tags": ["user"],
+        "summary": "Update profile",
+        "security": [{ "SessionCookie": [] }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["username", "profile_public"],
+                "properties": {
+                  "username": { "type": "string", "minLength": 3, "maxLength": 30 },
+                  "profile_public": { "type": "boolean" },
+                  "country_code": { "type": "string", "maxLength": 2 },
+                  "leaderboard_opt_out": { "type": "boolean" }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": { "$ref": "#/components/responses/MeResponse" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "409": { "description": "Username conflict" },
+          "422": { "description": "Validation error" }
+        }
+      }
+    },
+    "/api/v1/me/username-availability/{username}": {
+      "get": {
+        "tags": ["user"],
+        "summary": "Check username availability",
+        "security": [{ "SessionCookie": [] }],
+        "parameters": [
+          { "name": "username", "in": "path", "required": true, "schema": { "type": "string" } }
+        ],
+        "responses": {
+          "200": {
+            "description": "Availability",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": { "may_be_available": { "type": "boolean" } }
+                }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "422": { "description": "Invalid username" }
+        }
+      }
+    },
+    "/api/v1/me/api-key": {
+      "get": {
+        "tags": ["user"],
+        "summary": "Check whether an API key exists (masked)",
+        "security": [{ "SessionCookie": [] }],
+        "responses": {
+          "200": {
+            "description": "Key presence",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "has_key": { "type": "boolean" },
+                    "masked": { "type": "string" }
+                  }
+                }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" }
+        }
+      }
+    },
+    "/api/v1/me/api-key": {
+      "post": {
+        "tags": ["user"],
+        "summary": "Rotate API key (returns new plaintext key once)",
+        "security": [{ "SessionCookie": [] }],
+        "responses": {
+          "200": {
+            "description": "New API key",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "api_key": { "type": "string" },
+                    "masked": { "type": "string" }
+                  }
+                }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" }
+        }
+      }
+    },
+    "/api/v1/dashboard/stats": {
+      "get": {
+        "tags": ["user"],
+        "summary": "Daily stats (hours, human/agent ratio, struggle episodes)",
+        "security": [{ "SessionCookie": [] }],
+        "responses": {
+          "200": {
+            "description": "Dashboard stats",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/DashboardStats" }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" }
+        }
+      }
+    },
+    "/api/v1/dashboard/insights": {
+      "get": {
+        "tags": ["user"],
+        "summary": "Insights (harness, language, active day, PESDO)",
+        "security": [{ "SessionCookie": [] }],
+        "responses": {
+          "200": {
+            "description": "Dashboard insights",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/DashboardInsights" }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" }
+        }
+      }
+    },
+    "/api/v1/projects": {
+      "get": {
+        "tags": ["projects"],
+        "summary": "List user's projects",
+        "security": [{ "SessionCookie": [] }],
+        "responses": {
+          "200": {
+            "description": "Project list",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": { "$ref": "#/components/schemas/ProjectSummary" }
+                }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" }
+        }
+      }
+    },
+    "/api/v1/projects/{id}": {
+      "delete": {
+        "tags": ["projects"],
+        "summary": "Soft-delete a project",
+        "security": [{ "SessionCookie": [] }],
+        "parameters": [
+          { "name": "id", "in": "path", "required": true, "schema": { "type": "integer", "format": "int64" } }
+        ],
+        "responses": {
+          "204": { "description": "Deleted" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "description": "Not found" }
+        }
+      }
+    },
+    "/api/v1/projects/merge": {
+      "post": {
+        "tags": ["projects"],
+        "summary": "Merge source project into target project",
+        "security": [{ "SessionCookie": [] }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["source_project_id", "target_project_id"],
+                "properties": {
+                  "source_project_id": { "type": "integer", "format": "int64" },
+                  "target_project_id": { "type": "integer", "format": "int64" }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Merge result",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "status": { "type": "string", "example": "merged" },
+                    "moved_episodes": { "type": "integer" }
+                  }
+                }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "description": "Project not found" },
+          "422": { "description": "Source equals target" }
+        }
+      }
+    },
+    "/api/v1/struggles": {
+      "get": {
+        "tags": ["episodes"],
+        "summary": "Struggle days with human/agent/struggle breakdown",
+        "security": [{ "SessionCookie": [] }],
+        "responses": {
+          "200": {
+            "description": "Struggle days",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": { "$ref": "#/components/schemas/StruggleDay" }
+                }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" }
+        }
+      }
+    },
+    "/api/v1/episodes": {
+      "get": {
+        "tags": ["episodes"],
+        "summary": "List recent productive episodes",
+        "security": [{ "SessionCookie": [] }],
+        "responses": {
+          "200": {
+            "description": "Episode list",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": { "$ref": "#/components/schemas/EpisodeSummary" }
+                }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" }
+        }
+      }
+    },
+    "/api/v1/rollups": {
+      "get": {
+        "tags": ["rollups"],
+        "summary": "Daily rollups for user",
+        "security": [{ "SessionCookie": [] }],
+        "parameters": [
+          { "name": "days", "in": "query", "schema": { "type": "integer", "minimum": 1, "maximum": 365, "default": 30 } }
+        ],
+        "responses": {
+          "200": {
+            "description": "Rollup entries",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": { "$ref": "#/components/schemas/RollupEntry" }
+                }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" }
+        }
+      }
+    },
+    "/api/v1/rollups/compute": {
+      "post": {
+        "tags": ["rollups"],
+        "summary": "Trigger rollup computation (last 30 days)",
+        "security": [{ "SessionCookie": [] }],
+        "responses": {
+          "200": {
+            "description": "Computed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "status": { "type": "string", "example": "computed" },
+                    "user_id": { "type": "integer", "format": "int64" },
+                    "days": { "type": "integer", "example": 30 }
+                  }
+                }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" }
+        }
+      }
+    },
+    "/api/v1/coach": {
+      "get": {
+        "tags": ["coach"],
+        "summary": "Privacy-safe coaching patterns from opt-in derived evidence",
+        "security": [{ "SessionCookie": [] }],
+        "responses": {
+          "200": {
+            "description": "Coaching summary",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/CoachSummary" }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" }
+        }
+      }
+    },
+    "/api/v1/risk-findings": {
+      "get": {
+        "tags": ["risk"],
+        "summary": "Review-only derived-evidence findings for current user",
+        "security": [{ "SessionCookie": [] }],
+        "responses": {
+          "200": {
+            "description": "Risk findings",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/RiskFindings" }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" }
+        }
+      }
+    },
+    "/api/v1/annotations": {
+      "post": {
+        "tags": ["annotations"],
+        "summary": "Create advisory annotation",
+        "security": [{ "SessionCookie": [] }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["session_key", "label", "evidence"],
+                "properties": {
+                  "session_key": { "type": "string" },
+                  "label": { "type": "string", "enum": ["debugging", "guided", "delegated", "reading", "exploring"] },
+                  "evidence": { "type": "string" }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Annotation recorded",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/AnnotateResponse" }
+              }
+            }
+          },
+          "400": { "description": "Invalid label or empty evidence" },
+          "401": { "$ref": "#/components/responses/Unauthorized" }
+        }
+      }
+    },
+    "/api/v1/sse": {
+      "get": {
+        "tags": ["sse"],
+        "summary": "Server-sent events stream",
+        "security": [{ "SessionCookie": [] }],
+        "responses": {
+          "200": {
+            "description": "Event stream",
+            "content": { "text/event-stream": { "schema": { "type": "string" } } }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" }
+        }
+      }
+    },
+    "/api/v1/evidence-bundles": {
+      "post": {
+        "tags": ["evidence"],
+        "summary": "Ingest an opt-in redacted evidence bundle",
+        "security": [{ "SessionCookie": [] }, { "BearerToken": [] }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/EvidenceBundleRequest" }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Bundle ingested",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/EvidenceBundleResponse" }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "422": { "description": "Invalid bundle" }
+        }
+      },
+      "get": {
+        "tags": ["evidence"],
+        "summary": "Caller's redacted evidence-bundle provenance summaries",
+        "security": [{ "SessionCookie": [] }, { "BearerToken": [] }],
+        "responses": {
+          "200": {
+            "description": "Bundle summaries",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": { "$ref": "#/components/schemas/EvidenceBundleSummary" }
+                }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" }
+        }
+      }
+    },
+    "/api/v1/evidence-bundles/{bundle_id}": {
+      "get": {
+        "tags": ["evidence"],
+        "summary": "Caller's derived event records and provenance for a bundle",
+        "security": [{ "SessionCookie": [] }, { "BearerToken": [] }],
+        "parameters": [
+          { "name": "bundle_id", "in": "path", "required": true, "schema": { "type": "string" } }
+        ],
+        "responses": {
+          "200": {
+            "description": "Bundle detail",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/EvidenceBundleDetail" }
+              }
+            }
+          },
+          "400": { "description": "Invalid bundle id" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "description": "Bundle not found" }
+        }
+      }
+    },
+    "/api/v1/cli/pairings": {
+      "tags": ["cli"],
+      "post": {
+        "summary": "Start CLI pairing (device code + user code)",
+        "responses": {
+          "200": {
+            "description": "Pairing created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "device_code": { "type": "string" },
+                    "user_code": { "type": "string" },
+                    "verification_uri": { "type": "string" },
+                    "expires_in": { "type": "integer", "example": 1800 }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/cli/pairings/complete": {
+      "tags": ["cli"],
+      "post": {
+        "summary": "Approve pairing and receive installation token",
+        "security": [{ "SessionCookie": [] }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["code"],
+                "properties": { "code": { "type": "string" } }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Pairing approved",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "status": { "type": "string", "example": "approved" },
+                    "token": { "type": "string" }
+                  }
+                }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "409": { "description": "Already approved or expired" },
+          "422": { "description": "Missing code" }
+        }
+      }
+    },
+    "/api/v1/cli/pairings/status": {
+      "tags": ["cli"],
+      "post": {
+        "summary": "Poll for pairing token",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["device_code"],
+                "properties": { "device_code": { "type": "string" } }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Pairing status",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "status": { "type": "string", "example": "approved" },
+                    "token": { "type": "string" }
+                  }
+                }
+              }
+            }
+          },
+          "404": { "description": "Not found" },
+          "422": { "description": "Invalid device code" }
+        }
+      }
+    },
+    "/api/v1/sync": {
+      "tags": ["sync"],
+      "post": {
+        "summary": "Push episodes, annotations, checkpoints (CLI sync alias)",
+        "security": [{ "SessionCookie": [] }, { "BearerToken": [] }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/SyncRequest" }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Synced",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/SyncResponse" }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "422": { "description": "Invalid sync payload" }
+        }
+      }
+    },
+    "/api/v1/upload": {
+      "tags": ["sync"],
+      "post": {
+        "summary": "Canonical CLI upload endpoint",
+        "security": [{ "SessionCookie": [] }, { "BearerToken": [] }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/SyncRequest" }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Synced",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/SyncResponse" }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "422": { "description": "Invalid sync payload" }
+        }
+      }
+    },
+    "/v1/events": {
+      "tags": ["ingest"],
+      "post": {
+        "summary": "Native event ingest",
+        "security": [{ "SessionCookie": [] }, { "BearerToken": [] }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["events"],
+                "properties": {
+                  "events": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "required": ["id", "occurred_at", "kind"],
+                      "properties": {
+                        "id": { "type": "string" },
+                        "occurred_at": { "type": "integer" },
+                        "kind": { "type": "string" }
+                      }
+                    },
+                    "maxItems": 100
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": { "description": "Events created" },
+          "400": { "description": "Invalid batch" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "429": { "description": "User in cooldown" }
+        }
+      }
+    },
+    "/api/hackatime/v1/users/current/heartbeats.bulk": {
+      "tags": ["ingest"],
+      "post": {
+        "summary": "WakaTime-compatible heartbeat bulk ingest",
+        "security": [{ "SessionCookie": [] }, { "BearerToken": [] }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "array",
+                "items": { "type": "object" },
+                "minItems": 1,
+                "maxItems": 100
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": { "description": "Heartbeats created" },
+          "400": { "description": "Invalid batch" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "429": { "description": "User in cooldown" }
+        }
+      }
+    },
+    "/api/v1/policy/skill": {
+      "get": {
+        "tags": ["policy"],
+        "summary": "Server's canonical annotation policy (SKILL.md)",
+        "responses": {
+          "200": {
+            "description": "Policy markdown",
+            "content": { "text/markdown": { "schema": { "type": "string" } } }
+          }
+        }
+      }
+    },
+    "/api/v1/users/{username}": {
+      "get": {
+        "tags": ["leaderboard"],
+        "summary": "Public profile",
+        "parameters": [
+          { "name": "username", "in": "path", "required": true, "schema": { "type": "string" } }
+        ],
+        "responses": {
+          "200": {
+            "description": "Public profile",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ProfileResponse" }
+              }
+            }
+          },
+          "404": { "description": "Not found or not public" }
+        }
+      }
+    },
+    "/api/v1/leaderboard": {
+      "get": {
+        "tags": ["leaderboard"],
+        "summary": "Top 100 users by credited seconds",
+        "responses": {
+          "200": {
+            "description": "Leaderboard entries",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": { "$ref": "#/components/schemas/LeaderboardEntry" }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/admin/sessions": {
+      "tags": ["admin"],
+      "get": {
+        "summary": "Session integrity review",
+        "security": [{ "SessionCookie": [] }],
+        "parameters": [
+          { "name": "limit", "in": "query", "schema": { "type": "integer", "minimum": 1, "maximum": 500, "default": 50 } }
+        ],
+        "responses": {
+          "200": { "description": "Session reviews", "content": { "application/json": { "schema": { "type": "array", "items": { "$ref": "#/components/schemas/SessionReview" } } } } },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "description": "Forbidden (not admin)" }
+        }
+      }
+    },
+    "/api/v1/admin/users": {
+      "tags": ["admin"],
+      "get": {
+        "summary": "List all users (query: q, limit)",
+        "security": [{ "SessionCookie": [] }],
+        "parameters": [
+          { "name": "q", "in": "query", "schema": { "type": "string" } },
+          { "name": "limit", "in": "query", "schema": { "type": "integer", "minimum": 1, "maximum": 500, "default": 50 } }
+        ],
+        "responses": {
+          "200": { "description": "User list", "content": { "application/json": { "schema": { "type": "array", "items": { "$ref": "#/components/schemas/AdminUser" } } } } },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "description": "Forbidden (not admin)" }
+        }
+      }
+    },
+    "/api/v1/admin/users/{id}": {
+      "tags": ["admin"],
+      "get": {
+        "summary": "User detail (projects, episodes, installations, hardware hashes)",
+        "security": [{ "SessionCookie": [] }],
+        "parameters": [
+          { "name": "id", "in": "path", "required": true, "schema": { "type": "integer", "format": "int64" } }
+        ],
+        "responses": {
+          "200": { "description": "User detail", "content": { "application/json": { "schema": { "type": "object" } } } },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "description": "Forbidden (not admin)" },
+          "404": { "description": "User not found" }
+        }
+      }
+    },
+    "/api/v1/admin/users/{id}/projects": {
+      "tags": ["admin"],
+      "get": {
+        "summary": "User's projects with rollup stats",
+        "security": [{ "SessionCookie": [] }],
+        "parameters": [
+          { "name": "id", "in": "path", "required": true, "schema": { "type": "integer", "format": "int64" } }
+        ],
+        "responses": {
+          "200": { "description": "User projects", "content": { "application/json": { "schema": { "type": "array", "items": { "$ref": "#/components/schemas/AdminProject" } } } } },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "description": "Forbidden (not admin)" }
+        }
+      }
+    },
+    "/api/v1/admin/users/{id}/admin": {
+      "tags": ["admin"],
+      "post": {
+        "summary": "Grant/revoke admin role",
+        "security": [{ "SessionCookie": [] }],
+        "parameters": [
+          { "name": "id", "in": "path", "required": true, "schema": { "type": "integer", "format": "int64" } }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["is_admin"],
+                "properties": { "is_admin": { "type": "boolean" } }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": { "description": "Updated user", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/AdminUser" } } } },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "description": "Forbidden (not admin)" },
+          "404": { "description": "User not found" }
+        }
+      }
+    },
+    "/api/v1/admin/users/{id}/ban": {
+      "tags": ["admin"],
+      "post": {
+        "summary": "Ban user",
+        "security": [{ "SessionCookie": [] }],
+        "parameters": [
+          { "name": "id", "in": "path", "required": true, "schema": { "type": "integer", "format": "int64" } }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": { "until": { "type": "string", "description": "ISO-8601 timestamp; absent = indefinite ban" } }
+              }
+            }
+          }
+        },
+        "responses": {
+          "204": { "description": "Banned" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "description": "Forbidden (not admin)" },
+          "409": { "description": "Cannot ban admin or not found" }
+        }
+      }
+    },
+    "/api/v1/admin/users/{id}/unban": {
+      "tags": ["admin"],
+      "post": {
+        "summary": "Unban user",
+        "security": [{ "SessionCookie": [] }],
+        "parameters": [
+          { "name": "id", "in": "path", "required": true, "schema": { "type": "integer", "format": "int64" } }
+        ],
+        "responses": {
+          "204": { "description": "Unbanned" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "description": "Forbidden (not admin)" },
+          "409": { "description": "Cannot unban admin or not found" }
+        }
+      }
+    },
+    "/api/v1/admin/users/{id}/cooldown": {
+      "tags": ["admin"],
+      "post": {
+        "summary": "Set ingest cooldown",
+        "security": [{ "SessionCookie": [] }],
+        "parameters": [
+          { "name": "id", "in": "path", "required": true, "schema": { "type": "integer", "format": "int64" } }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["until"],
+                "properties": { "until": { "type": "string", "description": "ISO-8601 timestamp" } }
+              }
+            }
+          }
+        },
+        "responses": {
+          "204": { "description": "Cooldown set" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "description": "Forbidden (not admin)" },
+          "409": { "description": "Cannot cooldown admin or not found" }
+        }
+      }
+    },
+    "/api/v1/admin/hardware-ban": {
+      "tags": ["admin"],
+      "post": {
+        "summary": "Ban all users matching a SHA-256 hardware digest",
+        "security": [{ "SessionCookie": [] }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["sha256_hash"],
+                "properties": { "sha256_hash": { "type": "string" } }
+              }
+            }
+          }
+        },
+        "responses": {
+          "204": { "description": "Hardware ban recorded" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "description": "Forbidden (not admin)" },
+          "422": { "description": "Invalid hash" }
+        }
+      }
+    },
+    "/api/v1/admin/activity": {
+      "tags": ["admin"],
+      "get": {
+        "summary": "Recent activity feed",
+        "security": [{ "SessionCookie": [] }],
+        "parameters": [
+          { "name": "limit", "in": "query", "schema": { "type": "integer", "minimum": 1, "maximum": 1000, "default": 100 } }
+        ],
+        "responses": {
+          "200": { "description": "Activity entries", "content": { "application/json": { "schema": { "type": "array", "items": { "$ref": "#/components/schemas/AdminActivity" } } } } },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "description": "Forbidden (not admin)" }
+        }
+      }
+    },
+    "/api/v1/admin/insights": {
+      "tags": ["admin"],
+      "get": {
+        "summary": "System-wide stats",
+        "security": [{ "SessionCookie": [] }],
+        "responses": {
+          "200": { "description": "Admin insights", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/AdminInsights" } } } },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "description": "Forbidden (not admin)" }
+        }
+      }
+    },
+    "/api/v1/admin/harness-integrity": {
+      "tags": ["admin"],
+      "get": {
+        "summary": "Harness hook integrity review",
+        "security": [{ "SessionCookie": [] }],
+        "parameters": [
+          { "name": "limit", "in": "query", "schema": { "type": "integer", "minimum": 1, "maximum": 500, "default": 100 } }
+        ],
+        "responses": {
+          "200": { "description": "Harness integrity reviews", "content": { "application/json": { "schema": { "type": "array", "items": { "$ref": "#/components/schemas/HarnessIntegrityReview" } } } } },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "description": "Forbidden (not admin)" }
+        }
+      }
+    },
+    "/api/v1/admin/users/{user_id}/evidence-bundles": {
+      "tags": ["admin"],
+      "get": {
+        "summary": "Reviewer view of a user's redacted provenance summaries",
+        "security": [{ "SessionCookie": [] }],
+        "parameters": [
+          { "name": "user_id", "in": "path", "required": true, "schema": { "type": "integer", "format": "int64" } }
+        ],
+        "responses": {
+          "200": { "description": "Bundle summaries", "content": { "application/json": { "schema": { "type": "array", "items": { "$ref": "#/components/schemas/EvidenceBundleSummary" } } } } },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "description": "Forbidden (not admin)" }
+        }
+      }
+    },
+    "/api/v1/admin/users/{user_id}/evidence-bundles/{bundle_id}": {
+      "tags": ["admin"],
+      "get": {
+        "summary": "Reviewer view of a redacted evidence packet",
+        "security": [{ "SessionCookie": [] }],
+        "parameters": [
+          { "name": "user_id", "in": "path", "required": true, "schema": { "type": "integer", "format": "int64" } },
+          { "name": "bundle_id", "in": "path", "required": true, "schema": { "type": "string" } }
+        ],
+        "responses": {
+          "200": { "description": "Bundle detail", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/EvidenceBundleDetail" } } } },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "description": "Forbidden (not admin)" },
+          "404": { "description": "Not found" }
+        }
+      }
+    },
+    "/api/v1/admin/users/{user_id}/risk-findings": {
+      "tags": ["admin"],
+      "get": {
+        "summary": "Review-only findings for a user's derived evidence",
+        "security": [{ "SessionCookie": [] }],
+        "parameters": [
+          { "name": "user_id", "in": "path", "required": true, "schema": { "type": "integer", "format": "int64" } }
+        ],
+        "responses": {
+          "200": { "description": "Risk findings", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/RiskFindings" } } } },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "description": "Forbidden (not admin)" }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "SessionCookie": {
+        "type": "apiKey",
+        "in": "cookie",
+        "name": "hackai_session",
+        "description": "HttpOnly, Secure, SameSite=Lax session cookie set by `/auth/callback` after Hack Club OIDC login. Authenticated endpoints also accept a Bearer installation token where noted."
+      },
+      "BearerToken": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "CLI installation token (api_key) issued via CLI pairing or `/api/v1/me/api-key`."
+      }
+    },
+    "responses": {
+      "Unauthorized": {
+        "description": "Unauthenticated",
+        "content": {
+          "application/json": {
+            "schema": { "$ref": "#/components/schemas/Error" }
+          }
+        }
+      }
+    },
+    "schemas": {
+      "Error": {
+        "type": "object",
+        "required": ["error"],
+        "properties": { "error": { "type": "string" } }
+      },
+      "MeResponse": {
+        "type": "object",
+        "required": ["sub", "is_admin", "username", "profile_public", "leaderboard_opt_out"],
+        "properties": {
+          "sub": { "type": "string" },
+          "is_admin": { "type": "boolean" },
+          "display_name": { "type": "string", "nullable": true },
+          "username": { "type": "string" },
+          "email": { "type": "string", "nullable": true },
+          "slack_id": { "type": "string", "nullable": true },
+          "avatar_url": { "type": "string", "nullable": true },
+          "profile_public": { "type": "boolean" },
+          "country_code": { "type": "string", "nullable": true },
+          "leaderboard_opt_out": { "type": "boolean" }
+        }
+      },
+      "DashboardStats": {
+        "type": "object",
+        "properties": {
+          "hours_per_day": { "type": "integer" },
+          "human_ratio_permille": { "type": "integer" },
+          "agent_ratio_permille": { "type": "integer" },
+          "struggle_episodes": { "type": "integer" }
+        }
+      },
+      "DashboardInsights": {
+        "type": "object",
+        "properties": {
+          "most_used_harness": { "type": "string", "nullable": true },
+          "primary_language": { "type": "string", "nullable": true },
+          "most_active_day": { "type": "string", "nullable": true },
+          "pesdo_score_permille": { "type": "integer", "nullable": true },
+          "outcome_factor_permille": { "type": "integer", "nullable": true }
+        }
+      },
+      "ProjectSummary": {
+        "type": "object",
+        "required": ["id", "name", "total_seconds", "human_seconds", "agent_seconds"],
+        "properties": {
+          "id": { "type": "integer", "format": "int64" },
+          "name": { "type": "string" },
+          "total_seconds": { "type": "integer", "format": "int64" },
+          "human_seconds": { "type": "integer", "format": "int64" },
+          "agent_seconds": { "type": "integer", "format": "int64" },
+          "last_active": { "type": "string", "nullable": true }
+        }
+      },
+      "StruggleDay": {
+        "type": "object",
+        "required": ["day", "struggle_episodes", "credited_seconds", "human_seconds", "agent_seconds"],
+        "properties": {
+          "day": { "type": "string" },
+          "struggle_episodes": { "type": "integer", "format": "int64" },
+          "credited_seconds": { "type": "integer", "format": "int64" },
+          "human_seconds": { "type": "integer", "format": "int64" },
+          "agent_seconds": { "type": "integer", "format": "int64" }
+        }
+      },
+      "EpisodeSummary": {
+        "type": "object",
+        "required": ["started_at", "ended_at", "attempts", "resolved", "credited_seconds", "human_edit_seconds", "agent_edit_seconds"],
+        "properties": {
+          "started_at": { "type": "string" },
+          "ended_at": { "type": "string" },
+          "attempts": { "type": "integer" },
+          "resolved": { "type": "boolean" },
+          "credited_seconds": { "type": "integer", "format": "int64" },
+          "human_edit_seconds": { "type": "integer", "format": "int64" },
+          "agent_edit_seconds": { "type": "integer", "format": "int64" }
+        }
+      },
+      "RollupEntry": {
+        "type": "object",
+        "required": ["day", "credited_seconds", "human_seconds", "agent_seconds", "struggle_episodes"],
+        "properties": {
+          "day": { "type": "string" },
+          "credited_seconds": { "type": "integer", "format": "int64" },
+          "human_seconds": { "type": "integer", "format": "int64" },
+          "agent_seconds": { "type": "integer", "format": "int64" },
+          "struggle_episodes": { "type": "integer" }
+        }
+      },
+      "CoachSummary": {
+        "type": "object",
+        "properties": {
+          "data_source": { "type": "string" },
+          "recent_derived_events": { "type": "integer", "format": "int64" },
+          "baseline_weekly_derived_events": { "type": "integer", "format": "int64", "nullable": true },
+          "patterns": { "type": "array", "items": { "$ref": "#/components/schemas/CoachPattern" } }
+        }
+      },
+      "CoachPattern": {
+        "type": "object",
+        "properties": {
+          "code": { "type": "string" },
+          "observed_count": { "type": "integer" },
+          "priority": { "type": "string" },
+          "reason_codes": { "type": "array", "items": { "type": "string" } },
+          "tip": { "type": "string" },
+          "evidence_event_ids": { "type": "array", "items": { "type": "string" } }
+        }
+      },
+      "RiskFindings": {
+        "type": "object",
+        "properties": {
+          "disposition": { "type": "string" },
+          "data_source": { "type": "string" },
+          "tier": { "type": "string" },
+          "findings": { "type": "array", "items": { "$ref": "#/components/schemas/RiskFinding" } }
+        }
+      },
+      "RiskFinding": {
+        "type": "object",
+        "properties": {
+          "code": { "type": "string" },
+          "tier": { "type": "string" },
+          "observed_count": { "type": "integer" },
+          "reason_codes": { "type": "array", "items": { "type": "string" } },
+          "event_ids": { "type": "array", "items": { "type": "string" } },
+          "reviewer_guidance": { "type": "string" }
+        }
+      },
+      "AnnotateResponse": {
+        "type": "object",
+        "required": ["id", "status", "note"],
+        "properties": {
+          "id": { "type": "integer", "format": "int64" },
+          "status": { "type": "string" },
+          "note": { "type": "string" }
+        }
+      },
+      "ProfileResponse": {
+        "type": "object",
+        "required": ["username", "is_admin"],
+        "properties": {
+          "username": { "type": "string" },
+          "is_admin": { "type": "boolean" },
+          "display_name": { "type": "string", "nullable": true },
+          "avatar_url": { "type": "string", "nullable": true },
+          "country_code": { "type": "string", "nullable": true }
+        }
+      },
+      "LeaderboardEntry": {
+        "type": "object",
+        "required": ["rank", "username", "credited_seconds", "projects"],
+        "properties": {
+          "rank": { "type": "integer" },
+          "username": { "type": "string" },
+          "display_name": { "type": "string", "nullable": true },
+          "country_code": { "type": "string", "nullable": true },
+          "credited_seconds": { "type": "integer", "format": "int64" },
+          "projects": { "type": "integer", "format": "int64" }
+        }
+      },
+      "SessionReview": {
+        "type": "object",
+        "properties": {
+          "session_key": { "type": "string" },
+          "user_id": { "type": "integer", "format": "int64" },
+          "username": { "type": "string" },
+          "day": { "type": "string" },
+          "real_seconds": { "type": "number", "format": "double" },
+          "reported_seconds": { "type": "number", "format": "double", "nullable": true },
+          "delta_seconds": { "type": "number", "format": "double", "nullable": true },
+          "event_count": { "type": "integer", "format": "int64" },
+          "status": { "type": "string" },
+          "evidence": { "type": "string" }
+        }
+      },
+      "AdminUser": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "integer", "format": "int64" },
+          "username": { "type": "string" },
+          "is_admin": { "type": "boolean" },
+          "display_name": { "type": "string", "nullable": true },
+          "email": { "type": "string", "nullable": true },
+          "slack_id": { "type": "string", "nullable": true },
+          "avatar_url": { "type": "string", "nullable": true },
+          "country_code": { "type": "string", "nullable": true },
+          "profile_public": { "type": "boolean" },
+          "leaderboard_opt_out": { "type": "boolean" },
+          "projects": { "type": "integer", "format": "int64" },
+          "episodes": { "type": "integer", "format": "int64" },
+          "credited_seconds": { "type": "integer", "format": "int64" }
+        }
+      },
+      "AdminProject": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "integer", "format": "int64" },
+          "name": { "type": "string" },
+          "total_seconds": { "type": "integer", "format": "int64" },
+          "human_seconds": { "type": "integer", "format": "int64" },
+          "agent_seconds": { "type": "integer", "format": "int64" },
+          "last_active": { "type": "string", "nullable": true }
+        }
+      },
+      "AdminActivity": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string" },
+          "username": { "type": "string" },
+          "kind": { "type": "string" },
+          "occurred_at": { "type": "string" },
+          "payload": { "type": "object" }
+        }
+      },
+      "AdminInsights": {
+        "type": "object",
+        "properties": {
+          "users": { "type": "integer", "format": "int64" },
+          "public_profiles": { "type": "integer", "format": "int64" },
+          "projects": { "type": "integer", "format": "int64" },
+          "episodes": { "type": "integer", "format": "int64" },
+          "credited_seconds": { "type": "integer", "format": "int64" },
+          "active_installations": { "type": "integer", "format": "int64" },
+          "active_users_7d": { "type": "integer", "format": "int64" },
+          "resolution_rate_permille": { "type": "integer", "format": "int64" },
+          "failed_batches": { "type": "integer", "format": "int64" },
+          "harnesses": { "type": "array", "items": { "type": "object" } },
+          "projects_list": { "type": "array", "items": { "type": "object" } },
+          "recently_active": { "type": "array", "items": { "type": "object" } },
+          "risky_cases": { "type": "array", "items": { "type": "object" } }
+        }
+      },
+      "HarnessIntegrityReview": {
+        "type": "object",
+        "properties": {
+          "username": { "type": "string" },
+          "project_id": { "type": "integer", "format": "int64" },
+          "harness": { "type": "string" },
+          "session_id": { "type": "string" },
+          "hook_events": { "type": "integer", "format": "int64" },
+          "cadence_every": { "type": "integer", "format": "int64" },
+          "cadence_remainder": { "type": "integer", "format": "int64" },
+          "cadence_anomaly": { "type": "boolean" },
+          "tampered_events": { "type": "integer", "format": "int64" }
+        }
+      },
+      "SyncRequest": {
+        "type": "object",
+        "required": ["annotation_policy_sha256"],
+        "properties": {
+          "annotation_policy_sha256": { "type": "string" },
+          "cli_release_sha256": { "type": "string" },
+          "adapter_sha256": { "type": "object", "additionalProperties": { "type": "string" } },
+          "remote_url": { "type": "string", "nullable": true },
+          "head_sha": { "type": "string", "nullable": true },
+          "batch_id": { "type": "string", "nullable": true },
+          "annotations": { "type": "array", "items": { "type": "object" } },
+          "checkpoints": { "type": "array", "items": { "type": "object" } },
+          "episodes": { "type": "array", "items": { "type": "object" } },
+          "prompt_events": { "type": "array", "items": { "type": "object" } },
+          "prompt_metrics": { "type": "array", "items": { "type": "object" } },
+          "hardware_hashes": { "type": "object", "additionalProperties": { "type": "string" } },
+          "environment_class": { "type": "string" }
+        }
+      },
+      "SyncResponse": {
+        "type": "object",
+        "required": ["status", "project_id", "tampered_request"],
+        "properties": {
+          "status": { "type": "string" },
+          "project_id": { "type": "integer", "format": "int64" },
+          "repository_id": { "type": "integer", "format": "int64", "nullable": true },
+          "annotations_synced": { "type": "integer", "format": "int64" },
+          "checkpoints_synced": { "type": "integer", "format": "int64" },
+          "episodes_synced": { "type": "integer", "format": "int64" },
+          "prompt_events_synced": { "type": "integer", "format": "int64" },
+          "prompt_metrics_synced": { "type": "integer", "format": "int64" },
+          "tampered_request": { "type": "boolean" },
+          "github_url": { "type": "string", "nullable": true }
+        }
+      },
+      "EvidenceBundleRequest": {
+        "type": "object",
+        "required": ["bundle_id", "schema_version", "processor_version", "processor_hash", "formula_version", "client_version", "generated_at_unix_ms", "preview_approved", "events"],
+        "properties": {
+          "bundle_id": { "type": "string" },
+          "schema_version": { "type": "integer" },
+          "processor_version": { "type": "string" },
+          "processor_hash": { "type": "string" },
+          "formula_version": { "type": "string" },
+          "client_version": { "type": "string" },
+          "generated_at_unix_ms": { "type": "integer" },
+          "batch_seq": { "type": "integer", "nullable": true },
+          "prev_batch_hash": { "type": "string", "nullable": true },
+          "preview_approved": { "type": "boolean" },
+          "events": { "type": "array", "items": { "$ref": "#/components/schemas/DerivedEvent" } }
+        }
+      },
+      "DerivedEvent": {
+        "type": "object",
+        "required": ["event_id", "ts_utc_ms", "ts_seq_idx", "source_kind", "harness", "event_kind", "session_id_hash"],
+        "properties": {
+          "event_id": { "type": "string" },
+          "ts_utc_ms": { "type": "integer" },
+          "ts_seq_idx": { "type": "integer" },
+          "source_kind": { "type": "string", "enum": ["Transcript", "Git", "FsWatch", "Otel", "Hook"] },
+          "harness": { "type": "string" },
+          "event_kind": { "type": "string" },
+          "session_id_hash": { "type": "string" },
+          "project_id_hash": { "type": "string", "nullable": true },
+          "machine_id_hash": { "type": "string", "nullable": true },
+          "duration_ms": { "type": "integer", "nullable": true },
+          "lines_added": { "type": "integer", "nullable": true },
+          "lines_removed": { "type": "integer", "nullable": true },
+          "test_exit_code": { "type": "integer", "nullable": true },
+          "prompt_features": { "type": "object", "nullable": true },
+          "dialogue": { "type": "object", "nullable": true },
+          "reason_codes": { "type": "array", "items": { "type": "string" } }
+        }
+      },
+      "EvidenceBundleResponse": {
+        "type": "object",
+        "required": ["status", "bundle_id", "events_stored"],
+        "properties": {
+          "status": { "type": "string" },
+          "bundle_id": { "type": "string" },
+          "events_stored": { "type": "integer" }
+        }
+      },
+      "EvidenceBundleSummary": {
+        "type": "object",
+        "required": ["bundle_id", "processor_version", "processor_hash", "formula_version", "generated_at", "received_at", "event_count", "preview_approved"],
+        "properties": {
+          "bundle_id": { "type": "string" },
+          "processor_version": { "type": "string" },
+          "processor_hash": { "type": "string" },
+          "formula_version": { "type": "string" },
+          "generated_at": { "type": "string" },
+          "received_at": { "type": "string" },
+          "event_count": { "type": "integer", "format": "int64" },
+          "preview_approved": { "type": "boolean" }
+        }
+      },
+      "EvidenceBundleDetail": {
+        "type": "object",
+        "required": ["summary", "events"],
+        "properties": {
+          "summary": { "$ref": "#/components/schemas/EvidenceBundleSummary" },
+          "batch_seq": { "type": "integer", "format": "int64", "nullable": true },
+          "prev_batch_hash": { "type": "string", "nullable": true },
+          "events": { "type": "array", "items": { "$ref": "#/components/schemas/StoredDerivedEvent" } }
+        }
+      },
+      "StoredDerivedEvent": {
+        "type": "object",
+        "required": ["event_id", "occurred_at", "event_kind", "session_id_hash", "record"],
+        "properties": {
+          "event_id": { "type": "string" },
+          "occurred_at": { "type": "string" },
+          "event_kind": { "type": "string" },
+          "session_id_hash": { "type": "string" },
+          "record": { "type": "object" }
+        }
+      }
+    }
+  }
+}

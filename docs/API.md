@@ -4,6 +4,15 @@
 - **Development**: `http://localhost:3000`
 - **Production**: `https://hackclub.app`
 
+## Interactive API Reference
+
+An interactive Scalar reference is served by the API:
+
+- **Development**: `http://localhost:3000/docs` (OpenAPI at `/api/openapi.json`)
+- **Production**: `https://hackclub.app/docs` (OpenAPI at `/api/openapi.json`)
+
+The OpenAPI document is a hand-maintained static spec (`crates/server/openapi.json`) kept accurate to the routes in `crates/server/src/main.rs` and its route modules; no codegen framework is used.
+
 ## Authentication
 All authenticated endpoints require the `hackai_session` cookie (HttpOnly, Secure, SameSite=Lax).
 Set via `/auth/callback` after Hack Club OIDC login.

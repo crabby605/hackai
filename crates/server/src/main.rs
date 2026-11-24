@@ -7,6 +7,7 @@ mod cli;
 mod coach;
 mod evidence;
 mod ingest;
+mod openapi;
 mod policy;
 mod risk;
 mod rollups;
@@ -1059,6 +1060,7 @@ async fn main() {
         .merge(auth::auth_routes())
         .merge(ingest::routes())
         .merge(policy::routes())
+        .merge(openapi::routes())
         .layer(cors)
         .layer(middleware::from_fn_with_state(
             state.clone(),
