@@ -1,5 +1,8 @@
 /** @type {import('next').NextConfig} */
-const apiUrl = process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:3000"
+// Rewrites run inside the Next server. They must target the private API
+// origin, never the public site URL, otherwise /api requests recurse through
+// the edge proxy.
+const apiUrl = process.env.INTERNAL_API_URL || "http://127.0.0.1:3000"
 
 const nextConfig = {
   reactStrictMode: true,

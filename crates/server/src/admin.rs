@@ -64,6 +64,8 @@ pub struct AdminActivity {
     pub kind: String,
     pub occurred_at: String,
     pub payload: serde_json::Value,
+    /// Attributed authorship of the event: human, agent, or unknown.
+    pub authorship: Option<String>,
 }
 
 /// Advisory-only local-hook integrity evidence. It does not alter PESDO,
@@ -177,7 +179,7 @@ async fn insights(
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     let credited_seconds: i64 = sqlx::query_scalar(
-        "SELECT COALESCE(SUM(credited_seconds), 0)::BIGINT FROM productive_episodes",
+        "SELECT COALESCE(SUM(credited_seconds * outcome_factor_permille / 1000), 0)::BIGINT FROM productive_episodes",
     )
     .fetch_one(&state.db)
     .await
@@ -214,7 +216,7 @@ async fn insights(
             })
         })
         .collect();
-    let project_rows = sqlx::query("SELECT p.id, p.name, p.owner_id, u.username, u.display_name, COUNT(e.id)::BIGINT AS episodes, COALESCE(SUM(e.credited_seconds), 0)::BIGINT AS credited_seconds, EXTRACT(EPOCH FROM MAX(e.ended_at))::BIGINT * 1000 AS last_active FROM projects p JOIN users u ON u.id = p.owner_id LEFT JOIN productive_episodes e ON e.project_id = p.id WHERE p.deleted_at IS NULL GROUP BY p.id, u.username, u.display_name ORDER BY MAX(e.ended_at) DESC NULLS LAST LIMIT 100")
+    let project_rows = sqlx::query("SELECT p.id, p.name, p.owner_id, u.username, u.display_name, COUNT(e.id)::BIGINT AS episodes, COALESCE(SUM(e.credited_seconds * e.outcome_factor_permille / 1000), 0)::BIGINT AS credited_seconds, EXTRACT(EPOCH FROM MAX(e.ended_at))::BIGINT * 1000 AS last_active FROM projects p JOIN users u ON u.id = p.owner_id LEFT JOIN productive_episodes e ON e.project_id = p.id WHERE p.deleted_at IS NULL GROUP BY p.id, u.username, u.display_name ORDER BY MAX(e.ended_at) DESC NULLS LAST LIMIT 100")
         .fetch_all(&state.db).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     let projects_list = project_rows.into_iter().map(|row| serde_json::json!({
         "id": row.try_get::<i64, _>("id").unwrap_or_default().to_string(),
@@ -226,7 +228,7 @@ async fn insights(
         "credited_seconds": row.try_get::<i64, _>("credited_seconds").unwrap_or(0),
         "last_active": row.try_get::<Option<i64>, _>("last_active").unwrap_or(None),
     })).collect();
-    let active_rows = sqlx::query("SELECT u.id, u.username, u.display_name, EXTRACT(EPOCH FROM MAX(e.ended_at))::BIGINT * 1000 AS last_active, COALESCE(SUM(e.credited_seconds), 0)::BIGINT AS credited_seconds FROM users u JOIN productive_episodes e ON e.user_id = u.id GROUP BY u.id, u.username, u.display_name ORDER BY MAX(e.ended_at) DESC LIMIT 10")
+    let active_rows = sqlx::query("SELECT u.id, u.username, u.display_name, EXTRACT(EPOCH FROM MAX(e.ended_at))::BIGINT * 1000 AS last_active, COALESCE(SUM(e.credited_seconds * e.outcome_factor_permille / 1000), 0)::BIGINT AS credited_seconds FROM users u JOIN productive_episodes e ON e.user_id = u.id GROUP BY u.id, u.username, u.display_name ORDER BY MAX(e.ended_at) DESC LIMIT 10")
         .fetch_all(&state.db).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     let recently_active = active_rows
         .into_iter()
@@ -526,11 +528,16 @@ async fn ban_hardware(
         .execute(&state.db)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    sqlx::query("UPDATE users SET banned = TRUE, banned_until = NULL WHERE id IN (SELECT user_id FROM hardware_fingerprints WHERE sha256_hash = $1)")
-        .bind(&hash)
-        .execute(&state.db)
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    // Never hardware-ban an admin; lockouts must be reversible by another admin.
+    sqlx::query(
+        "UPDATE users SET banned = TRUE, banned_until = NULL \
+             WHERE id IN (SELECT user_id FROM hardware_fingerprints WHERE sha256_hash = $1) \
+               AND is_admin = FALSE",
+    )
+    .bind(&hash)
+    .execute(&state.db)
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     audit_mutation(&state, admin_user_id, "ban_hardware", admin_user_id).await;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -679,7 +686,7 @@ async fn list_users(
                 u.country_code, u.profile_public, u.leaderboard_opt_out, \
                 COUNT(DISTINCT p.id)::BIGINT AS projects, \
                 COUNT(DISTINCT e.id)::BIGINT AS episodes, \
-                COALESCE(SUM(e.credited_seconds), 0)::BIGINT AS credited_seconds \
+                COALESCE(SUM(e.credited_seconds * e.outcome_factor_permille / 1000), 0)::BIGINT AS credited_seconds \
          FROM users u \
          LEFT JOIN projects p ON p.owner_id = u.id AND p.deleted_at IS NULL \
          LEFT JOIN productive_episodes e ON e.user_id = u.id \
@@ -747,14 +754,14 @@ async fn get_user_review(
     let profile_public: bool = user_row.try_get("profile_public").unwrap_or(true);
 
     let project_rows = sqlx::query(
-        "SELECT p.id, p.name, r.remote_url, \
+        "SELECT p.id, p.name, r.remote_url, r.public, r.head_sha, \
                 COUNT(e.id)::BIGINT AS episodes, \
-                COALESCE(SUM(e.credited_seconds), 0)::BIGINT AS credited_seconds \
+                COALESCE(SUM(e.credited_seconds * e.outcome_factor_permille / 1000), 0)::BIGINT AS credited_seconds \
          FROM projects p \
          LEFT JOIN repositories r ON r.project_id = p.id \
          LEFT JOIN productive_episodes e ON e.project_id = p.id \
          WHERE p.owner_id = $1 AND p.deleted_at IS NULL \
-         GROUP BY p.id, p.name, r.remote_url \
+         GROUP BY p.id, p.name, r.remote_url, r.public, r.head_sha \
          ORDER BY credited_seconds DESC, p.name ASC",
     )
     .bind(id)
@@ -769,6 +776,8 @@ async fn get_user_review(
                 "id": r.try_get::<i64, _>("id").unwrap_or_default().to_string(),
                 "name": r.try_get::<String, _>("name").unwrap_or_default(),
                 "remote_url": r.try_get::<Option<String>, _>("remote_url").unwrap_or(None),
+                "github_public": r.try_get::<Option<bool>, _>("public").unwrap_or(None),
+                "head_sha": r.try_get::<Option<String>, _>("head_sha").unwrap_or(None),
                 "episodes": r.try_get::<i64, _>("episodes").unwrap_or(0),
                 "credited_seconds": r.try_get::<i64, _>("credited_seconds").unwrap_or(0),
             })
@@ -780,7 +789,7 @@ async fn get_user_review(
                 EXTRACT(EPOCH FROM started_at)::BIGINT * 1000 AS started_at, \
                 EXTRACT(EPOCH FROM ended_at)::BIGINT * 1000 AS ended_at, \
                 attempts, CASE WHEN resolved THEN 1 ELSE 0 END AS resolved, \
-                credited_seconds, human_edit_seconds, agent_edit_seconds, \
+                credited_seconds, outcome_factor_permille, human_edit_seconds, agent_edit_seconds, \
                 signatures::TEXT AS signatures_json, \
                 files_touched::TEXT AS files_touched_json, \
                 evidence_ids::TEXT AS evidence_ids_json, \
@@ -811,7 +820,10 @@ async fn get_user_review(
                 "ended_at": r.try_get::<i64, _>("ended_at").unwrap_or(0),
                 "attempts": r.try_get::<i32, _>("attempts").unwrap_or(1),
                 "resolved": r.try_get::<i32, _>("resolved").unwrap_or(0),
-                "credited_seconds": r.try_get::<i64, _>("credited_seconds").unwrap_or(0),
+                "claimed_seconds": r.try_get::<i64, _>("credited_seconds").unwrap_or(0),
+                "credited_seconds": r.try_get::<i64, _>("credited_seconds").unwrap_or(0)
+                    * r.try_get::<i32, _>("outcome_factor_permille").unwrap_or(1000) as i64 / 1000,
+                "outcome_factor_permille": r.try_get::<i32, _>("outcome_factor_permille").unwrap_or(1000),
                 "human_edit_seconds": r.try_get::<i64, _>("human_edit_seconds").unwrap_or(0),
                 "agent_edit_seconds": r.try_get::<i64, _>("agent_edit_seconds").unwrap_or(0),
                 "signatures_json": r.try_get::<String, _>("signatures_json").unwrap_or_else(|_| "[]".into()),
@@ -821,6 +833,48 @@ async fn get_user_review(
                 "batch_status": r.try_get::<String, _>("batch_status").unwrap_or_else(|_| "archived".into()),
                 "batch_bytes": r.try_get::<i64, _>("batch_bytes").unwrap_or(0),
                 "batch_received_at": r.try_get::<i64, _>("batch_received_at").unwrap_or(0),
+            })
+        })
+        .collect();
+
+    let commit_rows = sqlx::query(
+        "SELECT c.sha, c.tree_hash, c.files_changed, c.lines_added, c.lines_deleted, \
+                EXTRACT(EPOCH FROM c.committed_at)::BIGINT * 1000 AS committed_at, \
+                EXTRACT(EPOCH FROM c.github_observed_at)::BIGINT * 1000 AS github_observed_at, \
+                r.remote_owner, r.remote_name, r.public, \
+                s.outcome_factor_permille, s.github_gate_reason, \
+                EXTRACT(EPOCH FROM s.submitted_at)::BIGINT * 1000 AS submitted_at \
+         FROM commits c \
+         JOIN repositories r ON r.id = c.repository_id \
+         LEFT JOIN submissions s ON s.commit_sha = c.sha AND s.user_id = c.user_id AND s.project_id = r.project_id \
+         WHERE c.user_id = $1 \
+         ORDER BY c.committed_at DESC NULLS LAST, c.sha DESC \
+         LIMIT 100",
+    )
+    .bind(id)
+    .fetch_all(&state.db)
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let commits: Vec<serde_json::Value> = commit_rows
+        .into_iter()
+        .map(|row| {
+            let owner = row.try_get::<String, _>("remote_owner").unwrap_or_default();
+            let name = row.try_get::<String, _>("remote_name").unwrap_or_default();
+            let sha = row.try_get::<String, _>("sha").unwrap_or_default();
+            serde_json::json!({
+                "sha": sha,
+                "tree_hash": row.try_get::<String, _>("tree_hash").unwrap_or_default(),
+                "repository": format!("{owner}/{name}"),
+                "github_url": format!("https://github.com/{owner}/{name}/commit/{sha}"),
+                "github_public": row.try_get::<Option<bool>, _>("public").unwrap_or(None),
+                "claimed_committed_at": row.try_get::<Option<i64>, _>("committed_at").unwrap_or(None),
+                "github_observed_at": row.try_get::<Option<i64>, _>("github_observed_at").unwrap_or(None),
+                "submitted_at": row.try_get::<Option<i64>, _>("submitted_at").unwrap_or(None),
+                "files_changed": row.try_get::<i32, _>("files_changed").unwrap_or(0),
+                "lines_added": row.try_get::<i32, _>("lines_added").unwrap_or(0),
+                "lines_deleted": row.try_get::<i32, _>("lines_deleted").unwrap_or(0),
+                "outcome_factor_permille": row.try_get::<Option<i32>, _>("outcome_factor_permille").unwrap_or(None),
+                "github_gate_reason": row.try_get::<Option<String>, _>("github_gate_reason").unwrap_or(None),
             })
         })
         .collect();
@@ -866,6 +920,7 @@ async fn get_user_review(
         "profile_public": profile_public,
         "projects": projects,
         "episodes": episodes,
+        "commits": commits,
         "installations": installations,
         "hardware_hashes": hardware_hashes,
     })))
@@ -898,9 +953,9 @@ async fn user_projects(
 
     let rows = sqlx::query(
         "SELECT p.id, p.name, \
-                 COALESCE(SUM(r.credited_seconds), 0) AS total_seconds, \
-                 COALESCE(SUM(r.human_seconds), 0) AS human_seconds, \
-                 COALESCE(SUM(r.agent_seconds), 0) AS agent_seconds, \
+                 COALESCE(SUM(r.credited_seconds), 0)::BIGINT AS total_seconds, \
+                 COALESCE(SUM(r.human_seconds), 0)::BIGINT AS human_seconds, \
+                 COALESCE(SUM(r.agent_seconds), 0)::BIGINT AS agent_seconds, \
                  to_char(MAX(r.day), 'YYYY-MM-DD') AS last_active \
           FROM projects p \
           LEFT JOIN rollups r ON r.project_id = p.id AND r.user_id = $1 \
@@ -982,6 +1037,17 @@ async fn list_activity(
 
     let mut out = Vec::with_capacity(rows.len());
     for row in rows {
+        let payload: serde_json::Value = row
+            .try_get("payload")
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        let authorship = payload
+            .get("role")
+            .and_then(serde_json::Value::as_str)
+            .map(|role| match role {
+                "Human" => "human".to_string(),
+                "Agent" => "agent".to_string(),
+                _ => "unknown".to_string(),
+            });
         out.push(AdminActivity {
             id: row
                 .try_get("id")
@@ -995,9 +1061,8 @@ async fn list_activity(
             occurred_at: row
                 .try_get("occurred_at")
                 .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
-            payload: row
-                .try_get("payload")
-                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
+            payload,
+            authorship,
         });
     }
     Ok(Json(out))

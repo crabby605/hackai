@@ -7,7 +7,9 @@ export function middleware(request: NextRequest) {
     (path) => request.nextUrl.pathname === path || request.nextUrl.pathname.startsWith(`${path}/`),
   )
 
-  const session = request.cookies.get("hackai_session")?.value
+  const session =
+    request.cookies.get("__Host-hackai_session")?.value ??
+    request.cookies.get("hackai_session")?.value
   // The browser cannot validate a signed session token.  Treat the cookie as an
   // opaque credential and let the API verify its signature and expiry.
   if (needsSession && !session) {

@@ -1,4 +1,5 @@
 FROM rust:1.85-bookworm AS rust-builder
+RUN apt-get update && apt-get install -y --no-install-recommends cmake nasm && rm -rf /var/lib/apt/lists/*
 WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
@@ -6,8 +7,8 @@ RUN cargo build --release -p hackai-server --bin hackai-server --bin hackai-migr
 
 FROM node:22-bookworm-slim AS web-builder
 WORKDIR /src/web
-ARG NEXT_PUBLIC_API_URL=http://api:3000
-ENV NEXT_PUBLIC_API_URL=$NEXT_PUBLIC_API_URL
+ARG INTERNAL_API_URL=http://api:3000
+ENV INTERNAL_API_URL=$INTERNAL_API_URL
 COPY web/package.json web/package-lock.json* web/bun.lock* ./
 RUN if [ -f package-lock.json ]; then npm ci; else npm install; fi
 COPY web ./

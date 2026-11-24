@@ -20,6 +20,7 @@ use jsonwebtoken::{
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use sqlx::Row;
+use std::sync::Arc;
 use tokio::sync::RwLock;
 use uuid::Uuid;
 
@@ -39,7 +40,7 @@ pub struct OidcDiscovery {
 }
 
 /// Discovered from https://hackclub.com/.well-known/openid-configuration.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct AuthState {
     pub client: reqwest::Client,
     #[allow(dead_code)]
@@ -50,12 +51,12 @@ pub struct AuthState {
     /// Separate from OIDC client_secret to limit blast radius if leaked.
     pub session_signing_key: String,
     pub redirect_uri: String,
-    pub session_cookie_domain: Option<String>,
     pub authorization_endpoint: String,
     pub token_endpoint: String,
     pub jwks_uri: String,
     pub signing_algorithms: Vec<Algorithm>,
-    pub jwks: RwLock<Option<JwkSet>>,
+    #[allow(clippy::type_complexity)]
+    pub jwks: std::sync::Arc<tokio::sync::RwLock<Option<JwkSet>>>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -113,12 +114,11 @@ impl AuthState {
             client_secret: String::new(),
             session_signing_key: String::new(),
             redirect_uri: String::new(),
-            session_cookie_domain: None,
             authorization_endpoint: String::new(),
             token_endpoint: String::new(),
             jwks_uri: String::new(),
             signing_algorithms: Vec::new(),
-            jwks: RwLock::new(None),
+            jwks: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -131,17 +131,6 @@ impl AuthState {
             .map_err(|_| AuthError::Config("HC_AUTH_CLIENT_SECRET not set".into()))?;
         let redirect_uri = std::env::var("HC_AUTH_REDIRECT_URI")
             .unwrap_or_else(|_| "http://localhost:3000/callback".to_string());
-        let session_cookie_domain = std::env::var("SESSION_COOKIE_DOMAIN")
-            .ok()
-            .map(|s| s.trim().to_string())
-            .filter(|domain| !domain.is_empty())
-            .map(|domain| domain.trim_start_matches('.').to_string())
-            .filter(|domain| {
-                !domain.is_empty()
-                    && domain
-                        .chars()
-                        .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-')
-            });
         // Dedicated session signing key; separate from OIDC client_secret to limit
         // blast radius if either is leaked. Must be 32+ random bytes (base64 or hex).
         let session_signing_key = std::env::var("SESSION_SIGNING_KEY")
@@ -187,12 +176,11 @@ impl AuthState {
             client_secret,
             session_signing_key,
             redirect_uri,
-            session_cookie_domain,
             authorization_endpoint: discovery.authorization_endpoint,
             token_endpoint: discovery.token_endpoint,
             jwks_uri: discovery.jwks_uri,
             signing_algorithms,
-            jwks: RwLock::new(None),
+            jwks: Arc::new(RwLock::new(None)),
         })
     }
 
@@ -297,18 +285,40 @@ pub struct TokenResponse {
     pub refresh_token: Option<String>,
 }
 
-const SESSION_COOKIE: &str = "__Host-hackai_session";
+const HOST_SESSION_COOKIE: &str = "__Host-hackai_session";
+const PLAIN_SESSION_COOKIE: &str = "hackai_session";
 const OIDC_STATE_COOKIE: &str = "hackai_oidc_state";
 
-pub fn session_cookie(id_token: &str, is_https: bool, _domain: Option<&str>) -> HeaderMap {
-    // __Host- prefix requires Secure, Path=/, no Domain attribute
-    if !is_https {
-        eprintln!("ERROR: session cookie requires HTTPS when using __Host- prefix");
-        return HeaderMap::new();
+/// `__Host-` prefixed Secure cookie over HTTPS, plain `hackai_session` (non-Secure)
+/// over local HTTP. `__Host-` requires Path=/, no Domain, Secure; plain cookie omits
+/// Secure and is host-only (no Domain attribute) so it stays on localhost.
+fn session_cookie_name(is_https: bool) -> &'static str {
+    if is_https {
+        HOST_SESSION_COOKIE
+    } else {
+        PLAIN_SESSION_COOKIE
     }
+}
+
+fn cookie_value<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
+    headers
+        .get(header::COOKIE)?
+        .to_str()
+        .ok()?
+        .split(';')
+        .find_map(|part| {
+            let part = part.trim();
+            part.strip_prefix(&format!("{name}="))
+        })
+        .map(|value| value.trim())
+}
+
+pub fn session_cookie(id_token: &str, is_https: bool, _domain: Option<&str>) -> HeaderMap {
+    let name = session_cookie_name(is_https);
+    let secure_flag = if is_https { "; Secure" } else { "" };
     let mut headers = HeaderMap::new();
     let value = format!(
-        "{SESSION_COOKIE}={id_token}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age={SESSION_TTL_SECONDS}"
+        "{name}={id_token}; Path=/; HttpOnly{secure_flag}; SameSite=Lax; Max-Age={SESSION_TTL_SECONDS}"
     );
     headers.insert(
         header::SET_COOKIE,
@@ -317,33 +327,12 @@ pub fn session_cookie(id_token: &str, is_https: bool, _domain: Option<&str>) -> 
     headers
 }
 
-/// Get client IP from headers (trusts x-forwarded-for/x-real-ip).
-/// Used for rate limiting and logging only — never used for session binding.
-pub fn client_ip(headers: &HeaderMap) -> String {
-    headers
-        .get("x-forwarded-for")
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.split(',').next())
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .or_else(|| {
-            headers
-                .get("x-real-ip")
-                .and_then(|value| value.to_str().ok())
-        })
-        .unwrap_or("unknown")
-        .to_owned()
-}
-
 #[allow(dead_code)]
 pub fn clear_session_cookie(is_https: bool, _domain: Option<&str>) -> HeaderMap {
+    let name = session_cookie_name(is_https);
+    let secure_flag = if is_https { "; Secure" } else { "" };
     let mut headers = HeaderMap::new();
-    // __Host- prefix requires Secure, Path=/, no Domain attribute
-    if !is_https {
-        eprintln!("ERROR: session cookie requires HTTPS when using __Host- prefix");
-        return HeaderMap::new();
-    }
-    let value = format!("{SESSION_COOKIE}=; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=0");
+    let value = format!("{name}=; Path=/; HttpOnly{secure_flag}; SameSite=Lax; Max-Age=0");
     headers.insert(
         header::SET_COOKIE,
         HeaderValue::from_str(&value).unwrap_or_else(|_| HeaderValue::from_static("")),
@@ -388,17 +377,13 @@ pub async fn extract_current_user(
         }
         return row.try_get("auth_subject").ok();
     }
-    let cookie = headers.get(header::COOKIE)?.to_str().ok()?;
-    let raw_val = cookie
-        .split(';')
-        .find_map(|part| {
-            let part = part.trim();
-            part.strip_prefix(&format!("{SESSION_COOKIE}="))
-        })?
-        .trim();
-    if raw_val.is_empty() {
-        return None;
-    }
+    let raw_val = cookie_value(headers, HOST_SESSION_COOKIE)
+        .or_else(|| cookie_value(headers, PLAIN_SESSION_COOKIE))
+        .filter(|value| !value.is_empty());
+    let raw_val = match raw_val {
+        Some(value) => value,
+        None => return None,
+    };
 
     if auth.is_enabled() {
         let sub = if let Some(subject) = auth.verify_session_token(raw_val) {
@@ -501,7 +486,7 @@ async fn login(
             ("response_type", "code"),
             ("client_id", &state.client_id),
             ("redirect_uri", &state.redirect_uri),
-            ("scope", "openid profile"),
+            ("scope", "openid profile slack_id"),
             ("state", &state_nonce),
             ("code_challenge", &challenge),
             ("code_challenge_method", "S256"),
@@ -605,6 +590,16 @@ async fn callback(
 
     // Provision by stable subject. Provider presentation fields remain private
     // and are not used as authorization inputs.
+    // Hack Club Auth deliberately does not issue OIDC `picture` claims. When a
+    // user grants `slack_id`, Cachet supplies the corresponding Slack profile
+    // image without this service needing Slack credentials.
+    let avatar_url = claims.picture.clone().or_else(|| {
+        claims
+            .slack_id
+            .as_ref()
+            .map(|slack_id| format!("https://cachet.dunkirk.sh/users/{slack_id}/r"))
+    });
+
     sqlx::query(
         "INSERT INTO users (username, auth_subject, display_name, email, slack_id, avatar_url) \
          VALUES ($1, $2, $3, $4, $5, $6) \
@@ -617,7 +612,7 @@ async fn callback(
     .bind(claims.name.or(claims.nickname))
     .bind(claims.email)
     .bind(claims.slack_id)
-    .bind(claims.picture)
+    .bind(avatar_url)
     .execute(&app.db)
     .await
     .map_err(|e| AuthError::Upstream(format!("user provision: {e}")))?;
@@ -676,7 +671,18 @@ impl IntoResponse for AuthError {
 
 #[cfg(test)]
 mod tests {
-    use super::safe_continue_path;
+    use super::{
+        clear_session_cookie, cookie_value, safe_continue_path, session_cookie, session_cookie_name,
+    };
+    use axum::http::{HeaderMap, header};
+
+    fn header_text(headers: &HeaderMap) -> &str {
+        assert!(headers.contains_key(header::SET_COOKIE));
+        headers
+            .get(header::SET_COOKIE)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or("")
+    }
 
     #[test]
     fn continue_paths_stay_on_the_frontend() {
@@ -692,5 +698,68 @@ mod tests {
         ] {
             assert_eq!(safe_continue_path(path), None);
         }
+    }
+
+    #[test]
+    fn session_cookie_name_picks_host_over_https() {
+        assert_eq!(session_cookie_name(true), super::HOST_SESSION_COOKIE);
+        assert_eq!(session_cookie_name(false), super::PLAIN_SESSION_COOKIE);
+    }
+
+    #[test]
+    fn session_cookie_sets_secure_only_over_https() {
+        let https = session_cookie("token", true, None);
+        let val = header_text(&https);
+        assert!(val.starts_with("__Host-hackai_session="));
+        assert!(val.contains("; Secure"));
+        assert!(val.contains(" HttpOnly"));
+        assert!(val.contains(" SameSite=Lax"));
+
+        let http = session_cookie("token", false, None);
+        let val = header_text(&http);
+        assert!(val.starts_with("hackai_session="));
+        assert!(!val.contains("Secure"));
+        assert!(val.contains(" HttpOnly"));
+        assert!(!val.contains("__Host-"));
+    }
+
+    #[test]
+    fn clear_session_cookie_matches_name_and_max_age_zero() {
+        let https = clear_session_cookie(true, None);
+        let val = header_text(&https);
+        assert!(val.starts_with("__Host-hackai_session="));
+        assert!(val.contains("Max-Age=0"));
+
+        let http = clear_session_cookie(false, None);
+        let val = header_text(&http);
+        assert!(val.starts_with("hackai_session="));
+        assert!(!val.contains("Secure"));
+        assert!(val.contains("Max-Age=0"));
+    }
+
+    #[test]
+    fn cookie_value_reads_both_names() {
+        let set = |pairs: &str| {
+            let mut h = HeaderMap::new();
+            if let Ok(value) = pairs.parse() {
+                h.insert(header::COOKIE, value);
+            }
+            h
+        };
+        assert_eq!(
+            cookie_value(
+                &set("hackai_session=plain_value; other=1"),
+                "hackai_session"
+            ),
+            Some("plain_value")
+        );
+        assert_eq!(
+            cookie_value(
+                &set("__Host-hackai_session=host_value"),
+                "__Host-hackai_session"
+            ),
+            Some("host_value")
+        );
+        assert_eq!(cookie_value(&set("other=1"), "hackai_session"), None);
     }
 }

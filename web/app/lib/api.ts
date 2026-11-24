@@ -1,7 +1,16 @@
 import "server-only"
 import { cookies, headers } from "next/headers"
 
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:3000"
+// This module is server-only. Keep server rendering on the local/private API
+// route instead of sending authenticated requests back through the public edge.
+const API_BASE = process.env.INTERNAL_API_URL || "http://127.0.0.1:3000"
+
+// HTTPS sets __Host-hackai_session (Secure); local HTTP sets hackai_session
+// (non-Secure). Read/send whichever cookie the browser actually holds.
+const SESSION_COOKIE_HOST = "__Host-hackai_session"
+const SESSION_COOKIE_PLAIN = "hackai_session"
+
+type SessionCookie = { name: string; value: string }
 
 type SessionUser = {
   id: string
@@ -27,9 +36,13 @@ function extensionLanguage(path: string) {
   return languageByExtension[path.split(".").pop()?.toLowerCase() ?? ""] ?? null
 }
 
-async function getCookieSession(): Promise<string | undefined> {
+async function getCookieSession(): Promise<SessionCookie | undefined> {
   const cookieStore = await cookies()
-  return cookieStore.get("hackai_session")?.value
+  for (const name of [SESSION_COOKIE_HOST, SESSION_COOKIE_PLAIN]) {
+    const value = cookieStore.get(name)?.value
+    if (value) return { name, value }
+  }
+  return undefined
 }
 
 async function fetchApi<T>(path: string): Promise<T | null> {
@@ -37,7 +50,7 @@ async function fetchApi<T>(path: string): Promise<T | null> {
   if (!session) return null
 
   const reqHeaders: Record<string, string> = {
-    Cookie: `hackai_session=${session}`,
+    Cookie: `${session.name}=${session.value}`,
     "Content-Type": "application/json",
   }
   try {

@@ -304,6 +304,25 @@ fn classify_tool(content: &str) -> ToolClass {
         .any(|needle| value.contains(needle))
     {
         ToolClass::Run
+    } else if ["bash", "sh", "zsh"]
+        .iter()
+        .any(|needle| value == *needle || value.starts_with(needle))
+    {
+        ToolClass::Shell
+    } else if [
+        "edit",
+        "multi_edit",
+        "multiedit",
+        "notebook_edit",
+        "notebookedit",
+        "write",
+    ]
+    .iter()
+    .any(|needle| value == *needle)
+    {
+        // Claude's file-write tools are accounting events: they prove a write
+        // happened, distinct from the generic `Other` catch-all.
+        ToolClass::FileWrite
     } else {
         ToolClass::Other
     }
@@ -488,6 +507,31 @@ pub fn parse_claude_jsonl<P: Clone, I: Clone>(
                     change: None,
                     commit: None,
                 });
+                // Recognize an agent-driven git commit from the tool input
+                // transiently: record that the agent committed at this time
+                // without persisting the raw command, SHA, or any paths.
+                let is_git_commit = name == "Bash"
+                    && block
+                        .get("input")
+                        .and_then(|input| input.get("command").and_then(Value::as_str))
+                        .is_some_and(|command| command.contains("git commit"));
+                if is_git_commit {
+                    parsed.push(NormalizedEvent {
+                        schema_version: 1,
+                        id: hackai_schema::EventId(format!("{base_id}-gitcommit-{tool_index}")),
+                        occurred_at: UnixMillis(time),
+                        kind: EventKind::GitCommit,
+                        role: ActorRole::Agent,
+                        source: EventSource::ClaudeCode,
+                        project: project.clone(),
+                        session: session.clone(),
+                        rel_path: rel_path.clone(),
+                        prompt: None,
+                        tool: None,
+                        change: None,
+                        commit: None,
+                    });
+                }
             }
             continue;
         }
@@ -1259,5 +1303,40 @@ mod tests {
             parse_claude_jsonl(&input, (), None::<()>, "s".into()),
             Err(ParseError::TooManyRecords)
         ));
+    }
+
+    #[test]
+    fn classifies_claude_write_tools_as_file_writes() {
+        assert_eq!(classify_tool("Write"), ToolClass::FileWrite);
+        assert_eq!(classify_tool("Edit"), ToolClass::FileWrite);
+        assert_eq!(classify_tool("MultiEdit"), ToolClass::FileWrite);
+        assert_eq!(classify_tool("NotebookEdit"), ToolClass::FileWrite);
+    }
+
+    #[test]
+    fn classifies_bash_as_shell() {
+        assert_eq!(classify_tool("Bash"), ToolClass::Shell);
+        assert_eq!(classify_tool("sh"), ToolClass::Shell);
+    }
+
+    #[test]
+    fn recognizes_agent_git_commit_without_storing_command() {
+        let events = parse_claude_jsonl(
+            r#"{"type":"assistant","timestamp":1,"message":{"role":"assistant","content":[{"type":"tool_use","name":"Bash","input":{"command":"git commit -m PRIVATE_MSG"}}]}}"#,
+            (),
+            None::<()>,
+            "s".into(),
+        )
+        .unwrap_or_else(|_| unreachable!());
+        let commit = events
+            .iter()
+            .find(|event| event.kind == EventKind::GitCommit)
+            .unwrap_or_else(|| unreachable!());
+        assert_eq!(commit.role, ActorRole::Agent);
+        assert!(commit.commit.is_none(), "no SHA may be stored");
+        let encoded = serde_json::to_string(&events).unwrap_or_else(|_| unreachable!());
+        assert!(!encoded.contains("git commit"));
+        assert!(!encoded.contains("PRIVATE_MSG"));
+        assert!(!encoded.contains("sha"));
     }
 }

@@ -17,7 +17,7 @@ so the rationale and privacy constraints remain auditable.
 | Filesystem/git provenance | partial | Pull-based derived commit/worktree summaries and a polling observer exist. File attribution, blame/survival and review adequacy remain. |
 | Coach and evidence bundle | partial | Privacy-safe user/admin evidence views, local preview/upload, baseline comparison and rule-based tips exist. Tip-effect follow-up and episode deep links remain. |
 | Server evidence verification | complete | Redacted append-only evidence bundles, provenance and authenticated user/admin reads reject raw prompt/code/path/tool-output fields. |
-| GitHub gate, cross-user fraud checks, audits | not started | Requires server-side GitHub credentials/policy decisions. |
+| GitHub gate, cross-user fraud checks, audits | partial | Public-repository/HEAD verification gates submission credit; always-on cadence, overlap, clock-skew and cross-user commit-dedupe findings feed manual review. Account linking, farm detection and replay/Merkle audits remain. |
 
 1. Goals (priority order)
 1.  DECIDED, primary: self-improvement and self-knowing. Measure how much time a user spends coding with agent harnesses, split it into episodes, show where they are weak, show how they improved versus earlier sessions, and suggest concrete signals and tips. The episode categories the owner named: productivity, contextless yelling, oneshotting, working side by side.

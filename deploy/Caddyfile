@@ -1,4 +1,6 @@
-hackai.crabby605.hackclub.app {
+# Hack Club's domain edge terminates public TLS and proxies to this port.
+# Keep this origin HTTP-only so it never redirects the edge back to HTTPS.
+http://hackai.crabby605.hackclub.app {
 	encode gzip
 
 	handle /api/* {
@@ -8,6 +10,9 @@ hackai.crabby605.hackclub.app {
 		reverse_proxy 127.0.0.1:3000
 	}
 	handle /callback {
+		reverse_proxy 127.0.0.1:3000
+	}
+	handle /cli/* {
 		reverse_proxy 127.0.0.1:3000
 	}
 	handle /healthz {

@@ -34,6 +34,9 @@ jobs:
             target
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
 
+      - name: Install native build dependencies
+        run: sudo apt-get update && sudo apt-get install -y cmake nasm
+
       - name: Check formatting
         run: cargo fmt --all --check
 
@@ -43,11 +46,10 @@ jobs:
       - name: Run tests
         run: cargo test --workspace
 
-      - name: Security audit (allowed to fail on known issues)
-        continue-on-error: true
+      - name: Security audit
         run: |
           which cargo-audit || cargo install cargo-audit
-          cargo audit || true
+          cargo audit
         shell: bash
 
   web:
@@ -71,7 +73,8 @@ jobs:
         run: npm ci
 
       - name: Check formatting
-        run: npm run lint || true
+        continue-on-error: true
+        run: npm run lint
 
       - name: Type check
         run: npm run build

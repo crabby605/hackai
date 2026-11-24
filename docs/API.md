@@ -14,8 +14,7 @@ An interactive Scalar reference is served by the API:
 The OpenAPI document is a hand-maintained static spec (`crates/server/openapi.json`) kept accurate to the routes in `crates/server/src/main.rs` and its route modules; no codegen framework is used.
 
 ## Authentication
-All authenticated endpoints require the `hackai_session` cookie (HttpOnly, Secure, SameSite=Lax).
-Set via `/auth/callback` after Hack Club OIDC login.
+All authenticated endpoints require a session cookie (HttpOnly, SameSite=Lax), set via `/auth/callback` after Hack Club OIDC login. HTTPS uses `__Host-hackai_session` with `Secure`; local HTTP development uses `hackai_session` without `Secure`.
 
 ## Endpoints
 
@@ -42,10 +41,10 @@ Set via `/auth/callback` after Hack Club OIDC login.
 
 | Method | Path | Auth | Description |
 |--------|------|------|-------------|
-| GET | `/api/v1/dashboard/stats` | Session | Daily stats (hours, human/agent ratio, episodes) |
+| GET | `/api/v1/dashboard/stats` | Session | Last-24h stats, mean PESDO when available; habit labels are null until synced |
 | GET | `/api/v1/dashboard/insights` | Session | Insights (harness, language, active day, PESDO) |
 | GET | `/api/v1/coach` | Session | Privacy-safe coaching patterns from opt-in derived evidence; never returns prompt text |
-| GET | `/api/v1/risk-findings` | Session | Transparent, review-only derived-evidence findings; never changes score, eligibility, or account status |
+| GET | `/api/v1/risk-findings` | Session | Always-on review-only findings from synced episodes, prompts and commits; optional granular bundles add preview findings only |
 | GET | `/api/v1/rollups` | Session | Daily rollups for user |
 | POST | `/api/v1/rollups/compute` | Session | Trigger rollup computation |
 
@@ -53,8 +52,12 @@ Set via `/auth/callback` after Hack Club OIDC login.
 
 | Method | Path | Auth | Description |
 |--------|------|------|-------------|
-| GET | `/api/v1/projects` | Session | List user's projects |
+| GET | `/api/v1/projects?sort=time_desc` | Session | List projects; sort by time, last worked, or name in either direction |
 | DELETE | `/api/v1/projects/{id}` | Session | Soft-delete project |
+| GET | `/api/v1/projects/{id}/detail` | Session | Project totals and last 60 daily rollups |
+| GET | `/api/v1/projects/{id}/episodes` | Session | Last 100 episodes for project |
+| GET | `/api/v1/projects/by-name/{name}/detail` | Session | Project totals by name |
+| GET | `/api/v1/projects/by-name/{name}/episodes` | Session | Last 100 episodes for named project |
 | POST | `/api/v1/projects/merge` | Session | Merge source into target project |
 
 ### Annotations
@@ -67,7 +70,7 @@ Set via `/auth/callback` after Hack Club OIDC login.
 
 | Method | Path | Auth | Description |
 |--------|------|------|-------------|
-| GET | `/api/v1/episodes` | Session | List recent episodes (100) |
+| GET | `/api/v1/episodes` | Session | List recent episodes (50) |
 | GET | `/api/v1/struggles` | Session | Struggle days with human/agent/struggle breakdown |
 
 ### Leaderboard
@@ -88,7 +91,7 @@ Set via `/auth/callback` after Hack Club OIDC login.
 |--------|------|------|-------------|
 | GET | `/api/v1/admin/insights` | Admin | System-wide stats |
 | GET | `/api/v1/admin/users` | Admin | List all users (with query: `q`, `limit`) |
-| GET | `/api/v1/admin/users/{id}` | Admin | User detail (projects, episodes, installations, hardware hashes) |
+| GET | `/api/v1/admin/users/{id}` | Admin | User detail (projects, gated episodes, commit claims/GitHub state, installations, hardware hashes) |
 | GET | `/api/v1/admin/users/{id}/projects` | Admin | User's projects with rollup stats |
 | GET | `/api/v1/admin/activity` | Admin | Recent activity feed (query: `limit`) |
 | POST | `/api/v1/admin/users/{id}/ban` | Admin | Ban user (body: `{until?}`) |
@@ -141,7 +144,15 @@ Set via `/auth/callback` after Hack Club OIDC login.
 ```json
 {
   "remote_url": "https://github.com/owner/repo.git",
-  "head_sha": "abc123...",
+  "head_sha": "0123456789abcdef0123456789abcdef01234567",
+  "commits": [{
+    "sha": "0123456789abcdef0123456789abcdef01234567",
+    "tree_hash": "0123456789abcdef0123456789abcdef01234567",
+    "committed_at_millis": 1699999999000,
+    "files_changed": 3,
+    "lines_added": 40,
+    "lines_deleted": 5
+  }],
   "annotations": [
     {"session_key": "...", "label": "debugging", "evidence": "...", "applied": false, "discount_permille": 0}
   ],
@@ -169,7 +180,15 @@ Set via `/auth/callback` after Hack Club OIDC login.
 
 ## Response Format
 
-Success: `{ "status": "synced", "project_id": 1, ... }`
+Success: `{ "status": "synced", "project_id": 1, "outcome_factor_permille": 1000, "github_gate_reason": "verified", ... }`
+
+The CLI sends at most 100 commits from the last seven days, without messages,
+authors, paths, or code. On each new sync batch the server checks the submitted
+HEAD through GitHub. O is 1000 only when the repository is public and GitHub
+confirms that HEAD; otherwise it is 0 and the response includes a reason.
+GitHub outages retain the claims but do not grant gated credit. Client commit
+times are claims, never server-observed push times. Set optional `GITHUB_TOKEN`
+on the server to raise API rate limits.
 
 Error: `{ "error": "message" }` with appropriate HTTP status.
 

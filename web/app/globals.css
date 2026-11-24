@@ -319,3 +319,20 @@ h1, h2, h3, .dashboard-heading h1, .page-heading h1, .landing-hero h1, .landing 
 .admin-empty { color: var(--muted-foreground); }
 .visibility-option.selected { border-color: var(--border); background: var(--secondary); }
 .public-link { background: var(--secondary); }
+
+/* Secondary copy must remain legible on every dark surface.  Legacy page
+   styles used --muted before it became a background token, so normalize the
+   remaining explanatory text to the accessible foreground token. */
+.coach-heading > div > p:not(.eyebrow),
+.coach-pattern-meta,
+.coach-priority-low,
+.coach-pattern p,
+.coach-empty,
+.coach-privacy-note,
+.nav-section-label,
+.workspace-topnav a,
+.workspace-actions > a:first-child,
+.side-nav a,
+.sidebar-footer a,
+.admin-search-label,
+.admin-search-count { color: var(--muted-foreground); }

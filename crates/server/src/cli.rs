@@ -15,7 +15,7 @@ use axum::{
 };
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as base64_engine;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use sqlx::Row;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -32,6 +32,7 @@ pub fn routes() -> axum::Router<AppState> {
         .route("/api/v1/cli/pairings", post(create_pairing))
         .route("/api/v1/cli/pairings/complete", post(complete_pairing))
         .route("/api/v1/cli/pairings/status", post(pairing_status))
+        .route("/api/v1/me", get(me))
         .route("/api/v1/me/api-key", get(api_key).post(rotate_api_key))
 }
 
@@ -43,6 +44,22 @@ pub struct CompleteBody {
 #[derive(Deserialize)]
 pub struct PairingStatusBody {
     pub device_code: String,
+}
+
+/// Public profile of the currently authenticated user. Fields mirror what the
+/// Next.js frontend expects from GET /api/v1/me.
+#[derive(Clone, Debug, Serialize)]
+pub struct Me {
+    pub id: String,
+    pub username: String,
+    pub display_name: Option<String>,
+    pub email: Option<String>,
+    pub slack_id: Option<String>,
+    pub avatar_url: Option<String>,
+    pub country_code: Option<String>,
+    pub profile_public: bool,
+    pub leaderboard_opt_out: bool,
+    pub is_admin: bool,
 }
 
 fn now_secs() -> i64 {
@@ -137,16 +154,17 @@ async fn complete_pairing(
 
     let (token, token_hash) = issue_token();
 
-    // Store only the token hash in cli_pairings; return plaintext token directly
-    // in the response (delivered over authenticated TLS channel to the browser).
+    // Keep the durable hash, plus a short-lived handoff value for the polling
+    // CLI. pairing_status atomically clears the handoff on first consumption.
     let approved = sqlx::query(
         "UPDATE cli_pairings \
-             SET user_id = $1, status = 'approved', completed_at = now(), token_hash = $2 \
-           WHERE user_code = $3 AND status = 'pending' AND expires_at > now() \
+             SET user_id = $1, status = 'approved', completed_at = now(), token_hash = $2, pending_token = $3 \
+           WHERE user_code = $4 AND status = 'pending' AND expires_at > now() \
            RETURNING id",
     )
     .bind(user_id)
     .bind(token_hash.as_slice())
+    .bind(&token)
     .bind(code)
     .fetch_optional(&state.db)
     .await
@@ -188,20 +206,52 @@ async fn pairing_status(
         return Err(StatusCode::UNPROCESSABLE_ENTITY);
     }
 
-    // Mark as consumed on first status check after approval; token was already
-    // delivered in the complete_pairing response to the browser.
-    if let Some(_row) = sqlx::query(
-        "UPDATE cli_pairings SET consumed_at = COALESCE(consumed_at, now()), status = 'consumed' \
-         WHERE device_code = $1 AND status = 'approved' \
-         RETURNING status",
+    // Read and consume the handoff in one database transaction. A data
+    // modifying CTE cannot safely update the same Postgres row twice, which
+    // previously let the first update change the status to `consumed` before
+    // the token could be returned to the CLI.
+    let mut transaction = state
+        .db
+        .begin()
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let claimed = sqlx::query(
+        "SELECT id, pending_token FROM cli_pairings \
+         WHERE device_code = $1 AND status = 'approved' FOR UPDATE",
     )
     .bind(code)
-    .fetch_optional(&state.db)
+    .fetch_optional(&mut *transaction)
     .await
-    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-    {
-        return Ok(Json(serde_json::json!({ "status": "approved" })));
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    if let Some(row) = claimed {
+        let id: i64 = row
+            .try_get("id")
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        let token: Option<String> = row
+            .try_get("pending_token")
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        sqlx::query(
+            "UPDATE cli_pairings \
+             SET consumed_at = COALESCE(consumed_at, now()), status = 'consumed', pending_token = NULL \
+             WHERE id = $1",
+        )
+        .bind(id)
+        .execute(&mut *transaction)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        transaction
+            .commit()
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        return Ok(Json(
+            serde_json::json!({ "status": "approved", "token": token }),
+        ));
     }
+    transaction
+        .commit()
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     let row = sqlx::query(
         "SELECT CASE WHEN status = 'pending' AND expires_at <= now() THEN 'expired' ELSE status END AS status FROM cli_pairings WHERE device_code = $1",
@@ -291,4 +341,39 @@ async fn rotate_api_key(
     Ok(Json(
         serde_json::json!({ "api_key": token, "masked": mask_token(&token) }),
     ))
+}
+
+/// Profile of the currently authenticated user. Protected by the session cookie;
+/// returns 401 when no valid session exists.
+async fn me(State(state): State<AppState>, headers: HeaderMap) -> Result<Json<Me>, StatusCode> {
+    let sub = crate::auth::extract_current_user(&state.auth, &state.db, &headers)
+        .await
+        .ok_or(StatusCode::UNAUTHORIZED)?;
+    let row = sqlx::query(
+        "SELECT id, username, display_name, email, slack_id, avatar_url, country_code, \
+                 profile_public, leaderboard_opt_out, is_admin \
+             FROM users WHERE auth_subject = $1",
+    )
+    .bind(&sub)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+    .ok_or(StatusCode::NOT_FOUND)?;
+    Ok(Json(Me {
+        id: row
+            .try_get::<i64, _>("id")
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+            .to_string(),
+        username: row
+            .try_get("username")
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
+        display_name: row.try_get("display_name").ok(),
+        email: row.try_get("email").ok(),
+        slack_id: row.try_get("slack_id").ok(),
+        avatar_url: row.try_get("avatar_url").ok(),
+        country_code: row.try_get("country_code").ok(),
+        profile_public: row.try_get("profile_public").unwrap_or(true),
+        leaderboard_opt_out: row.try_get("leaderboard_opt_out").unwrap_or(false),
+        is_admin: row.try_get("is_admin").unwrap_or(false),
+    }))
 }

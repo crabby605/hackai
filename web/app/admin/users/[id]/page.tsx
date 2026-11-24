@@ -10,13 +10,19 @@ type Me = { is_admin: boolean }
 type Project = { id: string; name: string; episodes: number; credited_seconds: number }
 type Episode = {
   id: string; batch_id: string; project_id: string; harness: string | null; started_at: number; ended_at: number
-  attempts: number; resolved: number; credited_seconds: number; human_edit_seconds: number; agent_edit_seconds: number
+  attempts: number; resolved: number; credited_seconds: number; claimed_seconds: number; outcome_factor_permille: number; human_edit_seconds: number; agent_edit_seconds: number
   evidence_ids_json: string; formula_version: number
   batch_status: string; batch_bytes: number; batch_received_at: number
 }
+type Commit = {
+  sha: string; repository: string; github_url: string; github_public: boolean | null
+  claimed_committed_at: number | null; github_observed_at: number | null; submitted_at: number | null
+  files_changed: number; lines_added: number; lines_deleted: number
+  outcome_factor_permille: number | null; github_gate_reason: string | null
+}
 type Account = {
   username: string; display_name: string | null; avatar_url: string | null; country_code: string | null; profile_public: boolean
-  projects: Project[]; episodes: Episode[]; installations: { id: string }[]
+  projects: Project[]; episodes: Episode[]; commits: Commit[]; installations: { id: string }[]
 }
 type EvidenceBundle = { bundle_id: string; processor_version: string; formula_version: string; received_at: string; event_count: number; preview_approved: boolean }
 
@@ -54,6 +60,10 @@ export default async function AccountReview({ params }: { params: Promise<{ id: 
     <h2>Projects</h2>
     <div className="space-y-2">{account.projects.length ? account.projects.map((project) => <Card key={project.id} size="sm"><CardContent className="flex items-center justify-between gap-4"><div><div className="font-semibold">{project.name}</div><div className="text-xs text-muted-foreground">Derived activity summary</div></div><div className="text-sm font-medium">{project.episodes} episodes · {Math.round(project.credited_seconds / 60)} min</div></CardContent></Card>) : <p className="text-sm text-muted-foreground">No projects recorded.</p>}</div>
 
+    <h2 style={{ marginTop: "2rem" }}>Claimed commits / GitHub observation</h2>
+    <p className="heading-copy">Commit times and diff counts are client claims. O=1000 only when the server observes a public repository and the submitted HEAD on GitHub; other historical commits remain claims.</p>
+    {account.commits.length ? <div className="space-y-2">{account.commits.map((commit) => <Card key={`${commit.repository}:${commit.sha}`} size="sm"><CardContent className="flex flex-wrap items-center justify-between gap-3"><div><a className="font-mono text-sm font-semibold underline" href={commit.github_url} target="_blank" rel="noreferrer">{commit.sha.slice(0, 12)}</a><div className="text-xs text-muted-foreground">{commit.repository} · {commit.files_changed} files · +{commit.lines_added} / −{commit.lines_deleted}{commit.claimed_committed_at ? ` · claimed ${new Date(commit.claimed_committed_at).toLocaleString()}` : ""}</div></div><div className="text-right text-sm"><div>{commit.outcome_factor_permille === null ? "Not a submitted HEAD" : `O=${commit.outcome_factor_permille} · ${commit.github_gate_reason ?? "unverified"}`}</div><div className="text-xs text-muted-foreground">{commit.github_observed_at ? `GitHub observed ${new Date(commit.github_observed_at).toLocaleString()}` : "No successful GitHub HEAD observation"}</div></div></CardContent></Card>)}</div> : <p className="text-sm text-muted-foreground">No commit claims recorded.</p>}
+
     <h2 style={{ marginTop: "2rem" }}>Opt-in evidence exports</h2>
     <p className="heading-copy">Provenance summaries only. Reviewers do not see prompt text, code, file paths, or tool output.</p>
     {bundles?.length ? <div className="space-y-2">{bundles.map((bundle) => <Card key={bundle.bundle_id} size="sm"><CardContent className="flex flex-wrap items-center justify-between gap-3"><div><div className="font-semibold">{bundle.event_count} derived event{bundle.event_count === 1 ? "" : "s"}</div><div className="text-xs text-muted-foreground">Received {new Date(bundle.received_at).toLocaleString()} · processor {bundle.processor_version} · formula {bundle.formula_version}</div></div><span className="text-sm font-medium">{bundle.preview_approved ? "Approved export" : "Recorded export"}</span></CardContent></Card>)}</div> : <p className="text-sm text-muted-foreground">No opt-in evidence exports recorded.</p>}
@@ -73,7 +83,7 @@ export default async function AccountReview({ params }: { params: Promise<{ id: 
             <Cell label="Session duration">{duration(episode.ended_at - episode.started_at)}</Cell>
             <Cell label="Attempts / outcome">{episode.attempts} / {episode.resolved ? "resolved" : "unresolved"}</Cell>
             <Cell label="Human / agent work">{duration(episode.human_edit_seconds * 1000)} / {duration(episode.agent_edit_seconds * 1000)}</Cell>
-            <Cell label="Credited time">{duration(episode.credited_seconds * 1000)}</Cell>
+            <Cell label="Credited time">{duration(episode.credited_seconds * 1000)}{episode.outcome_factor_permille < 1000 ? ` (claimed ${duration(episode.claimed_seconds * 1000)}; O=${episode.outcome_factor_permille})` : ""}</Cell>
             <Cell label="Derived evidence records">{evidence.length}</Cell>
           </div>
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(230px, 1fr))", gap: "1rem" }}>

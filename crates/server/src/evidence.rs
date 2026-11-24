@@ -49,6 +49,8 @@ pub struct DerivedEvent {
     pub event_kind: EventKind,
     pub session_id_hash: String,
     #[serde(default)]
+    pub authorship: Option<Authorship>,
+    #[serde(default)]
     pub project_id_hash: Option<String>,
     #[serde(default)]
     pub machine_id_hash: Option<String>,
@@ -90,6 +92,17 @@ pub enum Harness {
     KimiCode,
     ZCode,
     Copilot,
+    Unknown,
+}
+
+/// Typed authorship for a derived event.  Only positive human or agent
+/// evidence is labelled; anything unresolved (initial commits, dirty worktrees,
+/// unmatched records) is unknown, never human by default.
+#[derive(Deserialize, Serialize, Clone, Copy, Debug, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum Authorship {
+    Human,
+    Agent,
     Unknown,
 }
 
@@ -586,6 +599,62 @@ mod tests {
     #[test]
     fn rejects_raw_or_non_derived_bundle_values() {
         let value = serde_json::json!({"bundle_id":"bundle-1", "schema_version":1, "processor_version":"v1", "processor_hash":"a".repeat(64), "formula_version":"v1", "client_version":"v1", "generated_at_unix_ms":1, "preview_approved":true, "events":[], "prompt_text":"do the thing"});
+        assert!(serde_json::from_value::<EvidenceBundleRequest>(value).is_err());
+    }
+
+    #[test]
+    fn accepts_typed_authorship_in_closed_schema() {
+        let value = serde_json::json!({
+            "bundle_id":"bundle-1",
+            "schema_version":1,
+            "processor_version":"v1",
+            "processor_hash":"a".repeat(64),
+            "formula_version":"v1",
+            "client_version":"v1",
+            "generated_at_unix_ms":1,
+            "preview_approved":true,
+            "events":[
+                {"event_id":"evt-1","ts_utc_ms":1,"ts_seq_idx":0,"source_kind":"git","harness":"claude_code","event_kind":"commit","session_id_hash":"x".repeat(32),"authorship":"agent"}
+            ]
+        });
+        assert!(serde_json::from_value::<EvidenceBundleRequest>(value).is_ok());
+    }
+
+    #[test]
+    fn missing_authorship_defaults_to_unknown() {
+        let value = serde_json::json!({
+            "bundle_id":"bundle-1",
+            "schema_version":1,
+            "processor_version":"v1",
+            "processor_hash":"a".repeat(64),
+            "formula_version":"v1",
+            "client_version":"v1",
+            "generated_at_unix_ms":1,
+            "preview_approved":true,
+            "events":[
+                {"event_id":"evt-1","ts_utc_ms":1,"ts_seq_idx":0,"source_kind":"git","harness":"claude_code","event_kind":"commit","session_id_hash":"x".repeat(32)}
+            ]
+        });
+        let request: EvidenceBundleRequest =
+            serde_json::from_value(value).unwrap_or_else(|_| unreachable!());
+        assert_eq!(request.events[0].authorship, None);
+    }
+
+    #[test]
+    fn rejects_unknown_fields_still_enforced() {
+        let value = serde_json::json!({
+            "bundle_id":"bundle-1",
+            "schema_version":1,
+            "processor_version":"v1",
+            "processor_hash":"a".repeat(64),
+            "formula_version":"v1",
+            "client_version":"v1",
+            "generated_at_unix_ms":1,
+            "preview_approved":true,
+            "events":[
+                {"event_id":"evt-1","ts_utc_ms":1,"ts_seq_idx":0,"source_kind":"git","harness":"claude_code","event_kind":"commit","session_id_hash":"x".repeat(32),"authorship":"agent","prompt_text":"leak"}
+            ]
+        });
         assert!(serde_json::from_value::<EvidenceBundleRequest>(value).is_err());
     }
 }

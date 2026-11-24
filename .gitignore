@@ -26,6 +26,7 @@ web/.wrangler/
 coverage/
 .turbo/
 *.log
+/deploy.sh
 
 # Keep the project overview and documentation readmes; nested package/tool
 # readmes are generated or vendor material unless explicitly added later.

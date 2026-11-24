@@ -6,7 +6,7 @@ import { cn } from "@/lib/utils"
 import { CoachSummary, type CoachSummaryData } from "@/components/coach-summary"
 
 interface Me { is_admin: boolean; display_name: string | null; username: string; profile_public: boolean; leaderboard_opt_out: boolean }
-interface DashboardStats { hours_per_day: number; human_ratio_permille: number; agent_ratio_permille: number; struggle_episodes: number }
+interface DashboardStats { hours_per_day: number; human_ratio_permille: number; agent_ratio_permille: number; struggle_episodes: number; mean_pesdo: number | null; habit_breakdown: { contextless_yelling_permille: number; oneshotting_permille: number; side_by_side_permille: number; productive_permille: number; total_episodes: number } | null }
 interface Episode { started_at: string; ended_at: string; attempts: number; resolved: boolean; credited_seconds: number }
 interface Project { id: string; name: string; total_seconds: number }
 interface DashboardInsights { most_used_harness: string | null; primary_language: string | null; most_active_day: string | null }
@@ -79,6 +79,17 @@ export default async function DashboardPage() {
           <a href="/struggles">Review recorded episodes</a>
         </aside>
       </div>
+
+      <section className="habit-breakdown" style={{ marginTop: "2rem" }}>
+        <h2>Coding habits (last 100 episodes)</h2>
+        <p className="heading-copy">Mean PESDO: <strong>{stats.mean_pesdo ?? "—"}</strong> / 1000 · {stats.habit_breakdown?.total_episodes ?? "—"} episodes</p>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: "1rem", marginTop: "1rem" }}>
+          <Badge variant="secondary">Contextless yelling: —</Badge>
+          <Badge variant="secondary">Oneshotting: —</Badge>
+          <Badge variant="secondary">Side by side: —</Badge>
+          <Badge variant="secondary">Productive: —</Badge>
+        </div>
+      </section>
     </section>
   )
 }

@@ -3,7 +3,7 @@
   "info": {
     "title": "HackAI API",
     "version": "0.1.0",
-    "description": "Time-tracking and coaching API for HackAI. Auth is via the HttpOnly `hackai_session` cookie (set after Hack Club OIDC login at `/auth/callback`) or a Bearer installation token for CLI sync/ingest endpoints."
+    "description": "Time-tracking and coaching API for HackAI. Auth is via the HttpOnly `__Host-hackai_session` cookie (set after Hack Club OIDC login at `/auth/callback`) or a Bearer installation token for CLI sync/ingest endpoints."
   },
   "servers": [
     { "url": "http://localhost:3000", "description": "Local development" },
@@ -89,7 +89,7 @@
           { "name": "state", "in": "query", "required": true, "schema": { "type": "string" } }
         ],
         "responses": {
-          "302": { "description": "Redirect to frontend, sets `hackai_session` cookie" },
+          "302": { "description": "Redirect to frontend, sets `__Host-hackai_session` cookie" },
           "400": { "description": "OAuth state mismatch" }
         }
       }
@@ -103,7 +103,7 @@
           { "name": "state", "in": "query", "required": true, "schema": { "type": "string" } }
         ],
         "responses": {
-          "302": { "description": "Redirect to frontend, sets `hackai_session` cookie" },
+          "302": { "description": "Redirect to frontend, sets `__Host-hackai_session` cookie" },
           "400": { "description": "OAuth state mismatch" }
         }
       }
@@ -272,6 +272,9 @@
         "tags": ["projects"],
         "summary": "List user's projects",
         "security": [{ "SessionCookie": [] }],
+        "parameters": [
+          { "name": "sort", "in": "query", "schema": { "type": "string", "default": "time_desc", "enum": ["time_desc", "time_asc", "last_worked_desc", "last_worked_asc", "name_asc", "name_desc"] } }
+        ],
         "responses": {
           "200": {
             "description": "Project list",
@@ -300,6 +303,46 @@
           "204": { "description": "Deleted" },
           "401": { "$ref": "#/components/responses/Unauthorized" },
           "404": { "description": "Not found" }
+        }
+      }
+    },
+    "/api/v1/projects/{id}/detail": {
+      "get": {
+        "tags": ["projects"], "summary": "Project detail and daily rollups", "security": [{ "SessionCookie": [] }],
+        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "integer", "format": "int64" } }],
+        "responses": {
+          "200": { "description": "Project detail", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ProjectDetail" } } } },
+          "401": { "$ref": "#/components/responses/Unauthorized" }, "404": { "description": "Not found" }
+        }
+      }
+    },
+    "/api/v1/projects/{id}/episodes": {
+      "get": {
+        "tags": ["projects"], "summary": "Recent episodes for a project", "security": [{ "SessionCookie": [] }],
+        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "integer", "format": "int64" } }],
+        "responses": {
+          "200": { "description": "Episodes", "content": { "application/json": { "schema": { "type": "array", "items": { "$ref": "#/components/schemas/EpisodeSummary" } } } } },
+          "401": { "$ref": "#/components/responses/Unauthorized" }
+        }
+      }
+    },
+    "/api/v1/projects/by-name/{name}/detail": {
+      "get": {
+        "tags": ["projects"], "summary": "Project detail by name", "security": [{ "SessionCookie": [] }],
+        "parameters": [{ "name": "name", "in": "path", "required": true, "schema": { "type": "string" } }],
+        "responses": {
+          "200": { "description": "Project detail", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ProjectDetail" } } } },
+          "401": { "$ref": "#/components/responses/Unauthorized" }, "404": { "description": "Not found" }
+        }
+      }
+    },
+    "/api/v1/projects/by-name/{name}/episodes": {
+      "get": {
+        "tags": ["projects"], "summary": "Recent episodes for a named project", "security": [{ "SessionCookie": [] }],
+        "parameters": [{ "name": "name", "in": "path", "required": true, "schema": { "type": "string" } }],
+        "responses": {
+          "200": { "description": "Episodes", "content": { "application/json": { "schema": { "type": "array", "items": { "$ref": "#/components/schemas/EpisodeSummary" } } } } },
+          "401": { "$ref": "#/components/responses/Unauthorized" }, "404": { "description": "Not found" }
         }
       }
     },
@@ -1137,7 +1180,7 @@
       "SessionCookie": {
         "type": "apiKey",
         "in": "cookie",
-        "name": "hackai_session",
+        "name": "__Host-hackai_session",
         "description": "HttpOnly, Secure, SameSite=Lax session cookie set by `/auth/callback` after Hack Club OIDC login. Authenticated endpoints also accept a Bearer installation token where noted."
       },
       "BearerToken": {
@@ -1164,9 +1207,9 @@
       },
       "MeResponse": {
         "type": "object",
-        "required": ["sub", "is_admin", "username", "profile_public", "leaderboard_opt_out"],
+        "required": ["id", "is_admin", "username", "profile_public", "leaderboard_opt_out"],
         "properties": {
-          "sub": { "type": "string" },
+          "id": { "type": "string" },
           "is_admin": { "type": "boolean" },
           "display_name": { "type": "string", "nullable": true },
           "username": { "type": "string" },
@@ -1184,7 +1227,19 @@
           "hours_per_day": { "type": "integer" },
           "human_ratio_permille": { "type": "integer" },
           "agent_ratio_permille": { "type": "integer" },
-          "struggle_episodes": { "type": "integer" }
+          "struggle_episodes": { "type": "integer" },
+          "mean_pesdo": { "type": "integer", "nullable": true },
+          "habit_breakdown": {
+            "type": "object", "nullable": true,
+            "description": "Null until episode labels are synced; unavailable metrics are never fabricated.",
+            "properties": {
+              "contextless_yelling_permille": { "type": "integer" },
+              "oneshotting_permille": { "type": "integer" },
+              "side_by_side_permille": { "type": "integer" },
+              "productive_permille": { "type": "integer" },
+              "total_episodes": { "type": "integer" }
+            }
+          }
         }
       },
       "DashboardInsights": {
@@ -1222,15 +1277,42 @@
       },
       "EpisodeSummary": {
         "type": "object",
-        "required": ["started_at", "ended_at", "attempts", "resolved", "credited_seconds", "human_edit_seconds", "agent_edit_seconds"],
+        "required": ["id", "started_at", "ended_at", "duration", "attempts", "resolved", "credited_seconds", "human_seconds", "agent_seconds"],
         "properties": {
+          "id": { "type": "string" },
           "started_at": { "type": "string" },
           "ended_at": { "type": "string" },
+          "duration": { "type": "integer", "format": "int64" },
           "attempts": { "type": "integer" },
           "resolved": { "type": "boolean" },
           "credited_seconds": { "type": "integer", "format": "int64" },
-          "human_edit_seconds": { "type": "integer", "format": "int64" },
-          "agent_edit_seconds": { "type": "integer", "format": "int64" }
+          "human_seconds": { "type": "integer", "format": "int64" },
+          "agent_seconds": { "type": "integer", "format": "int64" }
+        }
+      },
+      "ProjectDetail": {
+        "type": "object",
+        "required": ["id", "name", "total_seconds", "human_seconds", "agent_seconds", "episodes", "rollups"],
+        "properties": {
+          "id": { "type": "string" },
+          "name": { "type": "string" },
+          "total_seconds": { "type": "integer", "format": "int64" },
+          "human_seconds": { "type": "integer", "format": "int64" },
+          "agent_seconds": { "type": "integer", "format": "int64" },
+          "last_active": { "type": "string", "nullable": true },
+          "episodes": { "type": "integer", "format": "int64" },
+          "rollups": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "day": { "type": "string" },
+                "total_seconds": { "type": "integer", "format": "int64" },
+                "human_seconds": { "type": "integer", "format": "int64" },
+                "agent_seconds": { "type": "integer", "format": "int64" }
+              }
+            }
+          }
         }
       },
       "RollupEntry": {
@@ -1411,6 +1493,22 @@
           "adapter_sha256": { "type": "object", "additionalProperties": { "type": "string" } },
           "remote_url": { "type": "string", "nullable": true },
           "head_sha": { "type": "string", "nullable": true },
+          "commits": {
+            "type": "array", "maxItems": 100,
+            "description": "Recent commit claims for GitHub cross-checking; no messages, authors, paths or code.",
+            "items": {
+              "type": "object",
+              "required": ["sha", "tree_hash", "committed_at_millis", "files_changed", "lines_added", "lines_deleted"],
+              "properties": {
+                "sha": { "type": "string" },
+                "tree_hash": { "type": "string" },
+                "committed_at_millis": { "type": "integer", "format": "int64" },
+                "files_changed": { "type": "integer" },
+                "lines_added": { "type": "integer" },
+                "lines_deleted": { "type": "integer" }
+              }
+            }
+          },
           "batch_id": { "type": "string", "nullable": true },
           "annotations": { "type": "array", "items": { "type": "object" } },
           "checkpoints": { "type": "array", "items": { "type": "object" } },
@@ -1434,7 +1532,10 @@
           "prompt_events_synced": { "type": "integer", "format": "int64" },
           "prompt_metrics_synced": { "type": "integer", "format": "int64" },
           "tampered_request": { "type": "boolean" },
-          "github_url": { "type": "string", "nullable": true }
+          "github_url": { "type": "string", "nullable": true },
+          "commits_synced": { "type": "integer" },
+          "outcome_factor_permille": { "type": "integer", "nullable": true, "enum": [0, 1000, null] },
+          "github_gate_reason": { "type": "string", "nullable": true }
         }
       },
       "EvidenceBundleRequest": {
@@ -1467,6 +1568,7 @@
           "session_id_hash": { "type": "string" },
           "project_id_hash": { "type": "string", "nullable": true },
           "machine_id_hash": { "type": "string", "nullable": true },
+          "authorship": { "type": "string", "enum": ["human", "agent", "unknown"], "default": "unknown" },
           "duration_ms": { "type": "integer", "nullable": true },
           "lines_added": { "type": "integer", "nullable": true },
           "lines_removed": { "type": "integer", "nullable": true },

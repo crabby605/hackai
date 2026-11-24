@@ -20,14 +20,14 @@ pub fn cmd_track(repo: &Path, local_only: bool, dashboard: bool) -> io::Result<(
     };
 
     println!(
-        "Plan: create local-only {} and append a post-commit hook stanza.",
+        "Plan: create local tracking state at {}.",
         state::safe_terminal(&s.display().to_string())
     );
     fs::create_dir_all(&s)?;
     fs::write(s.join("tracked"), b"v1\n")?;
     state::audit(&r, "track")?;
 
-    if first_setup {
+    if first_setup && !local_only {
         let install = Confirm::new()
             .with_prompt("Install HackAI hooks, automatic MCP, and the annotation skill?")
             .default(true)
@@ -69,8 +69,13 @@ pub fn cmd_track(repo: &Path, local_only: bool, dashboard: bool) -> io::Result<(
                     annotation_policy_sha256: String::new(),
                     cli_release_sha256: String::new(),
                     adapter_sha256: std::collections::BTreeMap::new(),
+                    project_name: r
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .map(str::to_owned),
                     remote_url: None,
                     head_sha: None,
+                    commits: vec![],
                     annotations: vec![],
                     checkpoints: vec![],
                     episodes: vec![],

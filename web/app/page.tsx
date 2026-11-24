@@ -12,7 +12,7 @@ export default function LandingPage() {
 
 async function Home() {
   const cookieStore = await cookies()
-  const cookie = cookieStore.get("hackai_session")?.value
+  const cookie = cookieStore.get("__Host-hackai_session")?.value
   if (cookie && await getJson("/api/v1/me")) return <DashboardPage />
 
   return (

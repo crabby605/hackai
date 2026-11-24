@@ -11,11 +11,20 @@ use uuid::Uuid;
 
 pub fn root(input: &Path) -> io::Result<PathBuf> {
     let start = input.canonicalize()?;
-    start
+    let start = if start.is_file() {
+        start.parent().map(Path::to_path_buf).ok_or_else(|| {
+            io::Error::new(io::ErrorKind::NotFound, "input has no parent directory")
+        })?
+    } else {
+        start
+    };
+    Ok(start
         .ancestors()
         .find(|p| p.join(".git").exists())
         .map(Path::to_path_buf)
-        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "not inside a git repository"))
+        // Non-Git directories are first-class projects too. Git contributes
+        // optional evidence and submission-gate data when it is available.
+        .unwrap_or(start))
 }
 
 pub fn state_dir(root: &Path) -> PathBuf {
@@ -31,7 +40,11 @@ pub fn state_dir(root: &Path) -> PathBuf {
         };
         return resolved.join("hackai");
     }
-    dot_git.join("hackai")
+    if dot_git.is_dir() {
+        dot_git.join("hackai")
+    } else {
+        root.join(".hackai")
+    }
 }
 
 #[derive(Debug, Deserialize, Serialize)]

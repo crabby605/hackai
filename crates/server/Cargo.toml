@@ -8,17 +8,20 @@ axum = { version = "0.8", features = ["json", "macros"] }
 tokio = { version = "1.43", features = ["macros", "rt-multi-thread", "signal", "sync"] }
 tokio-stream = { version = "0.1", features = ["sync", "time"] }
 tower = { version = "0.5", features = ["limit", "timeout", "load-shed"] }
-tower-http = { version = "0.6", features = ["catch-panic", "request-id", "trace", "cors"] }
+tower-http = { version = "0.6", features = ["catch-panic", "request-id", "trace", "cors", "limit", "timeout"] }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 sqlx = { version = "0.9", features = ["postgres", "runtime-tokio", "tls-rustls", "json", "macros"] }
-jsonwebtoken = "10.3"
+# jsonwebtoken 10 requires an explicit crypto backend. Keeping the feature
+# selection singular avoids a runtime provider-selection panic on OAuth JWTs.
+jsonwebtoken = { version = "10.3", default-features = false, features = ["aws_lc_rs", "use_pem"] }
 base64 = "0.22"
 url = "2.5.9"
 uuid = { version = "1", features = ["v4"] }
 dotenvy = "0.15"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 sha2 = "0.10"
+hex = "0.4"
 [lints]
 workspace = true

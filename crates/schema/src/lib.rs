@@ -26,6 +26,10 @@ pub enum ActorRole {
     Human,
     Agent,
     Harness,
+    /// Attribution could not be resolved: initial/dirty-worktree observations,
+    /// unmatched commits, and any record without positive human or agent
+    /// evidence.  Never defaults to human.
+    Unknown,
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum EventSource {

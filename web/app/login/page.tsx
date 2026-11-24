@@ -19,9 +19,11 @@ export default async function LoginPage({
 }) {
   const { and, error, expired, utm_source, utm_medium } = await searchParams
   const targetPath = localPath(and)
-  const continuePath = targetPath === "/login" ? "/dashboard" : targetPath
+  // A direct sign-in (including the marketing-page CTA) should open the
+  // workspace. Preserve a specific protected destination when one exists.
+  const continuePath = targetPath === "/" || targetPath === "/login" ? "/dashboard" : targetPath
   const cookieStore = await cookies()
-  const cookie = cookieStore.get("hackai_session")?.value
+  const cookie = cookieStore.get("__Host-hackai_session")?.value
   const viewer = cookie ? await getJson<{ username: string }>("/api/v1/me") : null
   const sessionExpired = expired === "1" || Boolean(cookie && !viewer)
 

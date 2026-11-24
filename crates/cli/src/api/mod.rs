@@ -11,6 +11,16 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct SyncCommitClaim {
+    pub sha: String,
+    pub tree_hash: String,
+    pub committed_at_millis: i64,
+    pub files_changed: u32,
+    pub lines_added: u32,
+    pub lines_deleted: u32,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SyncPayload {
     /// Stable id for this queued batch; retries are idempotent on the server.
     #[serde(default)]
@@ -22,8 +32,14 @@ pub struct SyncPayload {
     pub cli_release_sha256: String,
     /// Hashes of the installed first-party harness adapters, keyed by harness.
     pub adapter_sha256: BTreeMap<String, String>,
+    /// Local folder name only; never an absolute path.
+    pub project_name: Option<String>,
     pub remote_url: Option<String>,
     pub head_sha: Option<String>,
+    /// Recent commit claims for server-side GitHub cross-checking. No commit
+    /// messages, author identities, paths, or source content are included.
+    #[serde(default)]
+    pub commits: Vec<SyncCommitClaim>,
     pub annotations: Vec<Value>,
     pub checkpoints: Vec<Value>,
     pub episodes: Vec<Value>,
@@ -133,14 +149,39 @@ pub fn build_sync_payload(repo_root: &Path) -> io::Result<SyncPayload> {
     let episodes = read_local_episodes(repo_root);
     let prompt_metrics = read_prompt_metrics(repo_root);
     let prompt_events = read_prompt_events(repo_root);
+    let week_ago_millis = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(io::Error::other)?
+        .as_millis()
+        .try_into()
+        .unwrap_or(i64::MAX)
+        .saturating_sub(7 * 24 * 60 * 60 * 1000);
+    let commits = hackai_gitx::commits_since(repo_root, week_ago_millis)
+        .unwrap_or_default()
+        .into_iter()
+        .take(100)
+        .map(|commit| SyncCommitClaim {
+            sha: commit.sha.0,
+            tree_hash: commit.tree,
+            committed_at_millis: commit.committed_at_millis,
+            files_changed: commit.files_changed,
+            lines_added: commit.lines_added,
+            lines_deleted: commit.lines_deleted,
+        })
+        .collect();
 
     Ok(SyncPayload {
         batch_id: Some(uuid::Uuid::new_v4().to_string()),
         annotation_policy_sha256: annotation_policy_sha256()?,
         cli_release_sha256: cli_release_sha256()?,
         adapter_sha256: adapter_sha256(repo_root),
+        project_name: repo_root
+            .file_name()
+            .and_then(|name| name.to_str())
+            .map(str::to_owned),
         remote_url: Some(remote_url),
         head_sha: Some(head_sha),
+        commits,
         annotations,
         checkpoints,
         episodes,

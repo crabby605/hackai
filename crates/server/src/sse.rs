@@ -34,14 +34,9 @@ pub struct SseHub {
 }
 
 impl SseHub {
-    pub fn new() -> (Self, broadcast::Receiver<SseMessage>) {
-        let (tx, rx) = broadcast::channel(1024);
-        (Self { tx }, rx)
-    }
-
-    /// Returns the sender so other modules (e.g. ingest, rollups) can publish.
-    pub fn sender(&self) -> broadcast::Sender<SseMessage> {
-        self.tx.clone()
+    pub fn new() -> Self {
+        let (tx, _rx) = broadcast::channel(1024);
+        Self { tx }
     }
 
     pub async fn publish(&self, user_id: i64, event: &str, data: serde_json::Value) {

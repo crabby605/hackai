@@ -13,7 +13,7 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use sqlx::Row;
 
-use crate::AppState;
+use crate::{AppState, get_user_id};
 
 #[derive(Clone, Debug, Serialize)]
 pub struct RollupEntry {
@@ -130,7 +130,7 @@ async fn compute_rollups(
         daily AS (
             SELECT
                 DATE(occurred_at) AS day,
-                SUM(CASE WHEN kind IN ('PromptSubmitted','HumanEdit') THEN duration_secs ELSE 0 END) AS human_seconds,
+                SUM(CASE WHEN kind = 'PromptSubmitted' OR (kind = 'HumanEdit' AND payload->>'role' = 'Human') THEN duration_secs ELSE 0 END) AS human_seconds,
                 SUM(CASE WHEN kind NOT IN ('PromptSubmitted','HumanEdit') THEN duration_secs ELSE 0 END) AS agent_seconds,
                 COUNT(CASE WHEN kind = 'ToolFinished' AND (payload->>'error_signature') IS NOT NULL THEN 1 END) AS struggle_episodes
             FROM durations
@@ -162,13 +162,4 @@ async fn compute_rollups(
         "user_id": user_id,
         "days": 30
     })))
-}
-
-async fn get_user_id(db: &sqlx::Pool<sqlx::Postgres>, sub: &str) -> Result<i64, sqlx::Error> {
-    let row = sqlx::query("SELECT id FROM users WHERE auth_subject = $1")
-        .bind(sub)
-        .fetch_optional(db)
-        .await?
-        .ok_or(sqlx::Error::RowNotFound)?;
-    row.try_get::<i64, _>("id")
 }

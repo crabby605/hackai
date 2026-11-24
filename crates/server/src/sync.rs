@@ -26,6 +26,16 @@ fn annotation_policy_sha256() -> &'static str {
     })
 }
 
+#[derive(Deserialize, Clone)]
+pub struct SyncCommitClaim {
+    pub sha: String,
+    pub tree_hash: String,
+    pub committed_at_millis: i64,
+    pub files_changed: u32,
+    pub lines_added: u32,
+    pub lines_deleted: u32,
+}
+
 #[derive(Deserialize)]
 pub struct SyncRequest {
     /// SHA-256 only; policy text is never uploaded.
@@ -34,10 +44,15 @@ pub struct SyncRequest {
     pub cli_release_sha256: String,
     #[serde(default)]
     pub adapter_sha256: std::collections::BTreeMap<String, String>,
+    #[serde(default)]
+    pub project_name: Option<String>,
     /// Git remote origin URL, e.g. "https://github.com/owner/name.git"
     pub remote_url: Option<String>,
     /// Current HEAD commit SHA
     pub head_sha: Option<String>,
+    /// Bounded recent commit claims; messages, authors, paths and code are not accepted.
+    #[serde(default)]
+    pub commits: Vec<SyncCommitClaim>,
     /// Hash of this sync batch; re-sending the same batch is a no-op.
     #[serde(default)]
     pub batch_id: Option<String>,
@@ -187,6 +202,9 @@ pub struct SyncResponse {
     pub prompt_metrics_synced: i64,
     pub tampered_request: bool,
     pub github_url: Option<String>,
+    pub commits_synced: usize,
+    pub outcome_factor_permille: Option<i32>,
+    pub github_gate_reason: Option<&'static str>,
 }
 
 pub fn routes() -> axum::Router<AppState> {
@@ -308,7 +326,13 @@ async fn sync(
         .unzip();
 
     // Find or create project
-    let project_name = remote_name.unwrap_or("local-project");
+    let local_project_name = req
+        .project_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|name| !name.is_empty() && name.len() <= 120 && !name.contains(['/', '\\']))
+        .unwrap_or("local-project");
+    let project_name = remote_name.unwrap_or(local_project_name);
     let project_row = sqlx::query(
         "INSERT INTO projects (name, owner_id, private) \
          VALUES ($1, $2, true) \
@@ -338,16 +362,20 @@ async fn sync(
     // Find or create repository record
     let repository_id = if let (Some(owner), Some(name)) = (remote_owner, remote_name) {
         let repo_row = sqlx::query(
-            "INSERT INTO repositories (project_id, remote_owner, remote_name, public) \
-             VALUES ($1, $2, $3, false) \
+            "INSERT INTO repositories (project_id, remote_owner, remote_name, public, remote_url, head_sha) \
+             VALUES ($1, $2, $3, false, $4, $5) \
              ON CONFLICT (project_id) DO UPDATE SET \
                remote_owner = EXCLUDED.remote_owner, \
-               remote_name = EXCLUDED.remote_name \
+               remote_name = EXCLUDED.remote_name, \
+               remote_url = EXCLUDED.remote_url, \
+               head_sha = EXCLUDED.head_sha \
              RETURNING id",
         )
         .bind(project_id)
         .bind(owner)
         .bind(name)
+        .bind(req.remote_url.as_deref())
+        .bind(req.head_sha.as_deref())
         .fetch_one(&state.db)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -359,6 +387,23 @@ async fn sync(
     } else {
         None
     };
+
+    if req.commits.len() > 100
+        || req.commits.iter().any(|commit| {
+            !valid_commit_hash(&commit.sha)
+                || !valid_commit_hash(&commit.tree_hash)
+                || commit.committed_at_millis < 0
+                || commit.files_changed > 1_000_000
+                || commit.lines_added > 100_000_000
+                || commit.lines_deleted > 100_000_000
+        })
+        || req
+            .head_sha
+            .as_deref()
+            .is_some_and(|sha| !sha.is_empty() && !valid_commit_hash(sha))
+    {
+        return Err(StatusCode::UNPROCESSABLE_ENTITY);
+    }
 
     // Idempotent on batch hash: a batch already applied for this user is skipped
     // wholesale so retries never duplicate episodes or double-count credit.
@@ -384,23 +429,125 @@ async fn sync(
                 prompt_metrics_synced: 0,
                 tampered_request,
                 github_url: github_url.map(|(o, n)| format!("https://github.com/{}/{}", o, n)),
+                commits_synced: 0,
+                outcome_factor_permille: None,
+                github_gate_reason: None,
             }));
         }
     }
 
-    // Store commit SHA if provided
-    if let (Some(sha), Some(repo_id)) = (&req.head_sha, repository_id) {
-        let _ = sqlx::query(
+    let mut gate = match (
+        github_url.as_ref(),
+        req.head_sha.as_deref().filter(|sha| !sha.is_empty()),
+    ) {
+        (Some((owner, name)), Some(sha)) => github_submission_gate(owner, name, sha).await,
+        (Some(_), None) => GateDecision {
+            outcome_factor_permille: 0,
+            reason: "missing_head",
+            repository_public: None,
+            github_observed: false,
+        },
+        (None, _) => GateDecision {
+            outcome_factor_permille: 0,
+            reason: "not_github_origin",
+            repository_public: None,
+            github_observed: false,
+        },
+    };
+
+    if let (Some(repo_id), Some(public)) = (repository_id, gate.repository_public) {
+        sqlx::query("UPDATE repositories SET public = $1 WHERE id = $2")
+            .bind(public)
+            .bind(repo_id)
+            .execute(&state.db)
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    }
+
+    let mut commits_synced = 0;
+    if let Some(repo_id) = repository_id {
+        for commit in &req.commits {
+            sqlx::query(
+                "INSERT INTO commits (sha, repository_id, user_id, tree_hash, committed_at, files_changed, lines_added, lines_deleted) \
+                 VALUES ($1, $2, $3, $4, to_timestamp($5::double precision / 1000), $6, $7, $8) \
+                 ON CONFLICT (sha) DO NOTHING",
+            )
+            .bind(&commit.sha)
+            .bind(repo_id)
+            .bind(user_id)
+            .bind(&commit.tree_hash)
+            .bind(commit.committed_at_millis as f64)
+            .bind(i64::from(commit.files_changed))
+            .bind(i64::from(commit.lines_added))
+            .bind(i64::from(commit.lines_deleted))
+            .execute(&state.db)
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+            commits_synced += 1;
+        }
+    }
+
+    // A globally reused SHA never transfers verification or ownership between users.
+    let head_tree = req
+        .commits
+        .iter()
+        .find(|commit| Some(commit.sha.as_str()) == req.head_sha.as_deref())
+        .map(|commit| commit.tree_hash.clone())
+        .unwrap_or_else(|| "0000000000000000000000000000000000000000".to_owned());
+    if let (Some(sha), Some(repo_id)) = (&req.head_sha, repository_id)
+        && !sha.is_empty()
+    {
+        sqlx::query(
             "INSERT INTO commits (sha, repository_id, user_id, tree_hash) \
-             VALUES ($1, $2, $3, $4) \
-             ON CONFLICT (sha) DO NOTHING",
+             VALUES ($1, $2, $3, $4) ON CONFLICT (sha) DO NOTHING",
         )
         .bind(sha)
         .bind(repo_id)
         .bind(user_id)
-        .bind("0000000000000000000000000000000000000000")
+        .bind(&head_tree)
         .execute(&state.db)
-        .await;
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        let owned = sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS(SELECT 1 FROM commits WHERE sha = $1 AND repository_id = $2 AND user_id = $3)",
+        )
+        .bind(sha)
+        .bind(repo_id)
+        .bind(user_id)
+        .fetch_one(&state.db)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        if !owned {
+            gate.outcome_factor_permille = 0;
+            gate.reason = "commit_claim_conflict";
+            gate.github_observed = false;
+        } else {
+            sqlx::query(
+                "INSERT INTO submissions (user_id, project_id, commit_sha, tree_hash, outcome_factor_permille, github_gate_reason, github_observed_at) \
+                 VALUES ($1, $2, $3, $4, $5, $6, CASE WHEN $7 THEN now() ELSE NULL END) \
+                 ON CONFLICT (user_id, project_id, commit_sha, tree_hash) DO UPDATE SET \
+                 outcome_factor_permille = EXCLUDED.outcome_factor_permille, \
+                 github_gate_reason = EXCLUDED.github_gate_reason, \
+                 github_observed_at = EXCLUDED.github_observed_at",
+            )
+            .bind(user_id)
+            .bind(project_id)
+            .bind(sha)
+            .bind(&head_tree)
+            .bind(gate.outcome_factor_permille)
+            .bind(gate.reason)
+            .bind(gate.github_observed)
+            .execute(&state.db)
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+            if gate.github_observed {
+                sqlx::query("UPDATE commits SET github_observed_at = now() WHERE sha = $1")
+                    .bind(sha)
+                    .execute(&state.db)
+                    .await
+                    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+            }
+        }
     }
 
     // Sync annotations
@@ -473,14 +620,14 @@ async fn sync(
         let stored = sqlx::query(
             "INSERT INTO productive_episodes \
              (user_id, project_id, session_key, started_at, ended_at, attempts, signatures, files_touched, \
-              human_edit_seconds, agent_edit_seconds, resolved, credited_seconds, evidence_ids, formula_version, batch_id) \
-             VALUES ($1, $2, $3, to_timestamp($4), to_timestamp($5), $6, $7, $8, $9, $10, $11, $12, $13, $14, $15) \
+              human_edit_seconds, agent_edit_seconds, resolved, credited_seconds, evidence_ids, formula_version, batch_id, outcome_factor_permille) \
+             VALUES ($1, $2, $3, to_timestamp($4), to_timestamp($5), $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16) \
              ON CONFLICT (user_id, project_id, session_key, started_at) DO UPDATE SET \
                ended_at = EXCLUDED.ended_at, attempts = EXCLUDED.attempts, signatures = EXCLUDED.signatures, \
                files_touched = EXCLUDED.files_touched, human_edit_seconds = EXCLUDED.human_edit_seconds, \
                agent_edit_seconds = EXCLUDED.agent_edit_seconds, resolved = EXCLUDED.resolved, \
                credited_seconds = EXCLUDED.credited_seconds, evidence_ids = EXCLUDED.evidence_ids, \
-               formula_version = EXCLUDED.formula_version",
+               formula_version = EXCLUDED.formula_version, outcome_factor_permille = EXCLUDED.outcome_factor_permille",
         )
         .bind(user_id)
         .bind(project_id)
@@ -497,6 +644,7 @@ async fn sync(
         .bind(serde_json::json!(evidence))
         .bind(i32::from(episode.formula_version))
         .bind(req.batch_id.as_deref())
+        .bind(gate.outcome_factor_permille)
         .execute(&state.db)
         .await;
         if stored.is_ok() {
@@ -542,6 +690,20 @@ async fn sync(
         }
     }
 
+    state
+        .sse_hub
+        .publish(
+            user_id,
+            "sync",
+            serde_json::json!({
+                "project_id": project_id,
+                "episodes_synced": episodes_synced,
+                "commits_synced": commits_synced,
+                "outcome_factor_permille": gate.outcome_factor_permille,
+            }),
+        )
+        .await;
+
     Ok(Json(SyncResponse {
         status: "synced",
         project_id,
@@ -553,7 +715,85 @@ async fn sync(
         prompt_metrics_synced,
         tampered_request,
         github_url: github_url.map(|(o, n)| format!("https://github.com/{}/{}", o, n)),
+        commits_synced,
+        outcome_factor_permille: Some(gate.outcome_factor_permille),
+        github_gate_reason: Some(gate.reason),
     }))
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct GateDecision {
+    outcome_factor_permille: i32,
+    reason: &'static str,
+    repository_public: Option<bool>,
+    github_observed: bool,
+}
+
+fn gate_from_facts(repository_public: Option<bool>, head_exists: Option<bool>) -> GateDecision {
+    let (outcome_factor_permille, reason) = match (repository_public, head_exists) {
+        (Some(true), Some(true)) => (1000, "verified"),
+        (Some(false), _) => (0, "private_or_nonpublic_repository"),
+        (None, _) => (0, "github_unavailable"),
+        (_, Some(false)) => (0, "head_not_found_in_repository"),
+        (_, None) => (0, "github_unavailable"),
+    };
+    GateDecision {
+        outcome_factor_permille,
+        reason,
+        repository_public,
+        github_observed: head_exists.is_some(),
+    }
+}
+
+async fn github_submission_gate(owner: &str, name: &str, sha: &str) -> GateDecision {
+    let Ok(client) = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(4))
+        .user_agent("hackai-submission-gate")
+        .build()
+    else {
+        return gate_from_facts(None, None);
+    };
+    let token = std::env::var("GITHUB_TOKEN").ok();
+    let repository = client
+        .get(format!("https://api.github.com/repos/{owner}/{name}"))
+        .header("Accept", "application/vnd.github+json");
+    let repository = match &token {
+        Some(token) if !token.is_empty() => repository.bearer_auth(token),
+        _ => repository,
+    };
+    let Ok(repository) = repository.send().await else {
+        return gate_from_facts(None, None);
+    };
+    if !repository.status().is_success() {
+        return gate_from_facts(None, None);
+    }
+    let Ok(repository) = repository.json::<serde_json::Value>().await else {
+        return gate_from_facts(None, None);
+    };
+    let public = repository
+        .get("private")
+        .and_then(serde_json::Value::as_bool)
+        .map(|private| !private);
+    if public != Some(true) {
+        return gate_from_facts(public, None);
+    }
+
+    let commit = client
+        .get(format!(
+            "https://api.github.com/repos/{owner}/{name}/commits/{sha}"
+        ))
+        .header("Accept", "application/vnd.github+json");
+    let commit = match &token {
+        Some(token) if !token.is_empty() => commit.bearer_auth(token),
+        _ => commit,
+    };
+    match commit.send().await {
+        Ok(response) if response.status().is_success() => gate_from_facts(public, Some(true)),
+        Ok(response) if response.status() == reqwest::StatusCode::NOT_FOUND => {
+            gate_from_facts(public, Some(false))
+        }
+        Ok(_) | Err(_) => gate_from_facts(public, None),
+    }
 }
 
 /// Parse a GitHub remote URL into (owner, name).
@@ -585,10 +825,46 @@ fn parse_github_url(url: &str) -> Option<(String, String)> {
     None
 }
 
+fn valid_commit_hash(value: &str) -> bool {
+    (value.len() == 40 || value.len() == 64)
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+}
+
 fn valid_github_component(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 100
         && value
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn github_gate_requires_public_repo_and_observed_head() {
+        assert_eq!(
+            gate_from_facts(Some(true), Some(true)).outcome_factor_permille,
+            1000
+        );
+        for decision in [
+            gate_from_facts(Some(false), Some(true)),
+            gate_from_facts(Some(true), Some(false)),
+            gate_from_facts(Some(true), None),
+            gate_from_facts(None, None),
+        ] {
+            assert_eq!(decision.outcome_factor_permille, 0);
+        }
+    }
+
+    #[test]
+    fn commit_hashes_are_bounded_lowercase_hex() {
+        assert!(valid_commit_hash(&"a".repeat(40)));
+        assert!(valid_commit_hash(&"0123456789abcdef".repeat(4)));
+        assert!(!valid_commit_hash(&"A".repeat(40)));
+        assert!(!valid_commit_hash("not-a-sha"));
+    }
 }

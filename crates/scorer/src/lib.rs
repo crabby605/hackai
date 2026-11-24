@@ -475,8 +475,15 @@ fn is_human_presence_event<P, I>(event: &NormalizedEvent<P, I>) -> Option<HumanA
                 Some(HumanActionKind::Prompt)
             }
         }
-        EventKind::HumanEdit => Some(HumanActionKind::HumanEdit),
-        EventKind::GitCommit => Some(HumanActionKind::HumanEdit),
+        EventKind::HumanEdit | EventKind::GitCommit => {
+            // Only a positively-human edit or commit establishes human
+            // presence.  Agent and unknown attributions create no presence.
+            if event.role == ActorRole::Human {
+                Some(HumanActionKind::HumanEdit)
+            } else {
+                None
+            }
+        }
         _ => None,
     }
 }
@@ -494,10 +501,12 @@ fn classify_evidence<P, I>(
     for event in events {
         match event.kind {
             EventKind::HumanEdit => {
-                let change = event.change.as_ref();
-                if change.is_some_and(|c| !c.hunk_hashes.is_empty()) {
-                    has_driven = true;
-                    evidence_ids.push(event.id.clone());
+                if event.role == ActorRole::Human {
+                    let change = event.change.as_ref();
+                    if change.is_some_and(|c| !c.hunk_hashes.is_empty()) {
+                        has_driven = true;
+                        evidence_ids.push(event.id.clone());
+                    }
                 }
             }
             EventKind::PromptSubmitted => {
@@ -956,6 +965,7 @@ pub fn productive_episodes<
                 files_touched.push(path.clone());
             }
             if event.kind == EventKind::HumanEdit
+                && event.role == ActorRole::Human
                 && let Some(change) = &event.change
             {
                 human_edit_seconds += u64::from(change.human_added + change.human_deleted);
@@ -1469,5 +1479,70 @@ mod tests {
         assert!(!assess_fullcaps("这是一个测试", std::iter::empty::<&str>()).is_fullcaps);
         assert!(assess_fullcaps("BROKEN WIDGET", std::iter::empty::<&str>()).is_fullcaps);
         assert!(!assess_fullcaps("BROKEN WIDGET", ["WIDGET"]).is_fullcaps);
+    }
+
+    fn commit_event(role: ActorRole) -> NormalizedEvent<String, String> {
+        NormalizedEvent {
+            schema_version: 1,
+            id: EventId("commit".into()),
+            occurred_at: UnixMillis(1),
+            kind: EventKind::GitCommit,
+            role,
+            source: EventSource::Codex,
+            project: "p".into(),
+            session: "s".into(),
+            rel_path: None,
+            prompt: None,
+            tool: None,
+            change: None,
+            commit: None,
+        }
+    }
+
+    fn worktree_event(role: ActorRole) -> NormalizedEvent<String, String> {
+        NormalizedEvent {
+            schema_version: 1,
+            id: EventId("worktree".into()),
+            occurred_at: UnixMillis(1),
+            kind: EventKind::HumanEdit,
+            role,
+            source: EventSource::Codex,
+            project: "p".into(),
+            session: "s".into(),
+            rel_path: None,
+            prompt: None,
+            tool: None,
+            change: None,
+            commit: None,
+        }
+    }
+
+    #[test]
+    fn human_commit_establishes_human_presence() {
+        assert!(is_human_presence_event(&commit_event(ActorRole::Human)).is_some());
+    }
+
+    #[test]
+    fn agent_and_unknown_commits_create_no_human_presence() {
+        for role in [ActorRole::Agent, ActorRole::Unknown, ActorRole::Harness] {
+            assert!(
+                is_human_presence_event(&commit_event(role)).is_none(),
+                "role {role:?} must not create human presence"
+            );
+        }
+    }
+
+    #[test]
+    fn unknown_worktree_candidate_creates_no_human_presence() {
+        assert!(is_human_presence_event(&worktree_event(ActorRole::Unknown)).is_none());
+        assert!(is_human_presence_event(&worktree_event(ActorRole::Agent)).is_none());
+        assert!(is_human_presence_event(&worktree_event(ActorRole::Human)).is_some());
+    }
+
+    #[test]
+    fn legacy_commit_defaults_to_unknown_without_human_credit() {
+        // A legacy commit with no resolvable role is unknown and credited to no one.
+        assert_eq!(commit_event(ActorRole::Unknown).role, ActorRole::Unknown);
+        assert!(is_human_presence_event(&commit_event(ActorRole::Unknown)).is_none());
     }
 }

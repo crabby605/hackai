@@ -1,5 +1,7 @@
 use crate::{TranscriptHarness, state};
 use hackai_gitx;
+use rusqlite::{Connection, OpenFlags};
+use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::{
     fs, io,
@@ -42,9 +44,6 @@ fn discovered_session_name(source: &Path) -> String {
 
 pub fn cmd_collect(repo: &Path) -> io::Result<()> {
     let root = state::root(repo)?;
-    if let Err(error) = collect_git_evidence(&root, None) {
-        eprintln!("Could not collect local git evidence: {error}");
-    }
     let mut imported_sources = 0_usize;
     let mut failures = 0_usize;
 
@@ -98,6 +97,12 @@ pub fn cmd_collect(repo: &Path) -> io::Result<()> {
             "OpenCode database found but not auto-imported: session-to-repository attribution is not yet verified. Use `hackai ingest opencode <path>` for an explicitly selected source."
         );
     }
+
+    // Git observation runs after transcript ingestion so agent commits already
+    // recorded from the transcript can be correlated with observed commits.
+    if let Err(error) = collect_git_evidence(&root, None) {
+        eprintln!("Could not collect local git evidence: {error}");
+    }
     println!("Collector imported {imported_sources} source(s); {failures} source(s) failed.");
     Ok(())
 }
@@ -121,6 +126,80 @@ pub fn cmd_observe(
     collect_git_evidence(repo, since_ms)
 }
 
+/// Attribution inputs for observed git commits.  Loaded once per observation
+/// run so every commit is attributed deterministically from the same snapshot.
+struct GitAttribution {
+    agent_commit_times: Vec<i64>,
+    transcript_times: Vec<i64>,
+}
+
+fn load_git_attribution(root: &Path) -> io::Result<GitAttribution> {
+    let mut agent_commit_times = Vec::new();
+    let mut transcript_times = Vec::new();
+    let database_path = state::event_store_path(root);
+    if database_path.exists() {
+        let database = Connection::open_with_flags(database_path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .map_err(|error| io::Error::other(format!("open event store: {error}")))?;
+        let mut statement = database
+            .prepare("SELECT occurred_at_ms, payload_json FROM normalized_events")
+            .map_err(|error| io::Error::other(format!("read event store: {error}")))?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(|error| io::Error::other(format!("query event store: {error}")))?;
+        for row in rows {
+            let (occurred_at, payload) =
+                row.map_err(|error| io::Error::other(format!("read event row: {error}")))?;
+            let payload: Value = serde_json::from_str(&payload).unwrap_or_default();
+            let kind = payload.get("kind").and_then(Value::as_str).unwrap_or("");
+            let role = payload.get("role").and_then(Value::as_str).unwrap_or("");
+            let source = payload.get("source").and_then(Value::as_str).unwrap_or("");
+            if kind == "GitCommit" && role == "Agent" {
+                agent_commit_times.push(occurred_at);
+            } else if kind != "GitCommit" && source != "ManualCli" {
+                transcript_times.push(occurred_at);
+            }
+        }
+    }
+    Ok(GitAttribution {
+        agent_commit_times,
+        transcript_times,
+    })
+}
+
+/// Correlation window for matching an observed commit to an agent commit
+/// recorded in the transcript.  Five minutes tolerates clock skew between the
+/// tool call and the git commit timestamp.
+const COMMIT_CORRELATION_WINDOW_MILLIS: i64 = 5 * 60 * 1000;
+
+/// Window within which transcript data is considered to "cover" a commit time.
+/// A commit inside a covered window with no matching agent commit may be
+/// labelled human; outside it, attribution stays unknown.
+const TRANSCRIPT_COVERAGE_WINDOW_MILLIS: i64 = 30 * 60 * 1000;
+
+/// Attribute an observed commit.  Only a commit that matches an agent commit
+/// recorded in the transcript is agent; a commit inside covered transcript data
+/// with no matching agent commit may be human; everything else (including the
+/// initial observation) is unknown, never human by default.
+fn attribute_commit(commit_time: i64, attribution: &GitAttribution) -> hackai_schema::ActorRole {
+    if attribution
+        .agent_commit_times
+        .iter()
+        .any(|t| (t - commit_time).abs() <= COMMIT_CORRELATION_WINDOW_MILLIS)
+    {
+        return hackai_schema::ActorRole::Agent;
+    }
+    if attribution
+        .transcript_times
+        .iter()
+        .any(|t| (t - commit_time).abs() <= TRANSCRIPT_COVERAGE_WINDOW_MILLIS)
+    {
+        return hackai_schema::ActorRole::Human;
+    }
+    hackai_schema::ActorRole::Unknown
+}
+
 fn collect_git_evidence(repo: &Path, since_ms: Option<i64>) -> io::Result<()> {
     let root = state::root(repo)?;
     let now_ms = now_unix_millis()?;
@@ -139,6 +218,7 @@ fn collect_git_evidence(repo: &Path, since_ms: Option<i64>) -> io::Result<()> {
         .and_then(|name| name.to_str())
         .unwrap_or("project")
         .to_owned();
+    let attribution = load_git_attribution(&root)?;
 
     let mut events = Vec::with_capacity(commits.len() + usize::from(!worktree.is_clean()));
     for commit in commits {
@@ -149,7 +229,7 @@ fn collect_git_evidence(repo: &Path, since_ms: Option<i64>) -> io::Result<()> {
             id: hackai_schema::EventId(format!("git-commit-{}", commit.sha.0)),
             occurred_at: hackai_schema::UnixMillis(commit.committed_at_millis),
             kind: hackai_schema::EventKind::GitCommit,
-            role: hackai_schema::ActorRole::Human,
+            role: attribute_commit(commit.committed_at_millis, &attribution),
             source: hackai_schema::EventSource::ManualCli,
             project: project.clone(),
             session: "git-local".to_owned(),
@@ -201,9 +281,9 @@ fn collect_git_evidence(repo: &Path, since_ms: Option<i64>) -> io::Result<()> {
             id: hackai_schema::EventId(format!("worktree-{fingerprint}")),
             occurred_at: hackai_schema::UnixMillis(now_ms),
             kind: hackai_schema::EventKind::HumanEdit,
-            // This is intentionally only a candidate: agent tool writes are
-            // excluded by the processor before E receives human-edit credit.
-            role: hackai_schema::ActorRole::Human,
+            // A dirty worktree is only a candidate observation: it carries no
+            // human line credit until positively attributed to a human.
+            role: hackai_schema::ActorRole::Unknown,
             source: hackai_schema::EventSource::ManualCli,
             project,
             session: "worktree-poll".to_owned(),
@@ -253,4 +333,58 @@ fn collect_git_evidence(repo: &Path, since_ms: Option<i64>) -> io::Result<()> {
         }
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn attribute_commit_matches_agent_commit() {
+        let attribution = GitAttribution {
+            agent_commit_times: vec![1_000_000],
+            transcript_times: Vec::new(),
+        };
+        assert_eq!(
+            attribute_commit(1_000_000, &attribution),
+            hackai_schema::ActorRole::Agent
+        );
+    }
+
+    #[test]
+    fn attribute_commit_human_when_covered_without_agent_match() {
+        let attribution = GitAttribution {
+            agent_commit_times: Vec::new(),
+            transcript_times: vec![1_000_000],
+        };
+        assert_eq!(
+            attribute_commit(1_000_000, &attribution),
+            hackai_schema::ActorRole::Human
+        );
+    }
+
+    #[test]
+    fn attribute_commit_defaults_to_unknown() {
+        let attribution = GitAttribution {
+            agent_commit_times: Vec::new(),
+            transcript_times: Vec::new(),
+        };
+        assert_eq!(
+            attribute_commit(1_000_000, &attribution),
+            hackai_schema::ActorRole::Unknown
+        );
+    }
+
+    #[test]
+    fn attribute_commit_outside_correlation_window_is_not_agent() {
+        let attribution = GitAttribution {
+            agent_commit_times: vec![1_000_000],
+            transcript_times: Vec::new(),
+        };
+        // Ten minutes away: outside the five-minute correlation window.
+        assert_eq!(
+            attribute_commit(1_000_000 + 600_000, &attribution),
+            hackai_schema::ActorRole::Unknown
+        );
+    }
 }

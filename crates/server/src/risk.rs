@@ -1,13 +1,12 @@
 #![forbid(unsafe_code)]
 
-//! Conservative, review-only findings from opt-in derived evidence.
+//! Conservative, review-only findings.
 //!
-//! These findings are intentionally computed at read time from the closed,
-//! redacted evidence schema. They never change PESDO, eligibility, or account
-//! status. A finding is a reason for a human to inspect corroborating evidence,
-//! not a claim that a person acted dishonestly.
-
-use std::collections::HashMap;
+//! Core findings are always-on and computed from normal synced derived data
+//! (`productive_episodes`, `prompt_events`, `commits`). A single opt-in finding
+//! covers evidence bundles that were never preview-approved. Findings never
+//! change PESDO, eligibility, or account status; they are reasons for a human
+//! to inspect corroborating evidence, not claims of dishonesty.
 
 use axum::{
     Json,
@@ -21,7 +20,6 @@ use sqlx::Row;
 use crate::AppState;
 
 const SAMPLE_EVENT_IDS: usize = 5;
-const MAX_EVENTS: i64 = 5_000;
 
 #[derive(Serialize)]
 pub struct RiskFindings {
@@ -40,21 +38,6 @@ pub struct RiskFinding {
     pub reason_codes: Vec<&'static str>,
     pub event_ids: Vec<String>,
     pub reviewer_guidance: &'static str,
-}
-
-#[derive(Default)]
-struct FindingAccumulator {
-    count: u32,
-    event_ids: Vec<String>,
-}
-
-impl FindingAccumulator {
-    fn observe(&mut self, event_id: String) {
-        self.count = self.count.saturating_add(1);
-        if self.event_ids.len() < SAMPLE_EVENT_IDS {
-            self.event_ids.push(event_id);
-        }
-    }
 }
 
 pub fn routes() -> axum::Router<AppState> {
@@ -83,67 +66,199 @@ async fn for_admin(
     findings_for_user(&state, user_id).await.map(Json)
 }
 
-async fn findings_for_user(state: &AppState, user_id: i64) -> Result<RiskFindings, StatusCode> {
-    let rows = sqlx::query(
-        "SELECT e.event_id, e.record, b.preview_approved \
-         FROM evidence_bundle_events e \
-         JOIN evidence_bundles b ON b.id = e.bundle_id \
-         WHERE b.user_id = $1 \
-         ORDER BY e.occurred_at DESC, e.id DESC LIMIT $2",
-    )
-    .bind(user_id)
-    .bind(MAX_EVENTS)
-    .fetch_all(&state.db)
-    .await
-    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    findings_from_rows(rows)
+/// Runs one bounded per-finding query, returning the real count plus a capped
+/// sample of identifiers. Every query is parameterized and LIMIT-bound so the
+/// endpoint can never scan or return an unbounded row set.
+async fn bounded_counts(
+    state: &AppState,
+    query: &'static str,
+    user_id: i64,
+) -> Result<(u32, Vec<String>), StatusCode> {
+    let rows = sqlx::query(query)
+        .bind(user_id)
+        .bind(SAMPLE_EVENT_IDS as i64)
+        .fetch_all(&state.db)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let mut total = 0u32;
+    let mut samples: Vec<String> = Vec::new();
+    for row in rows {
+        total = u32::try_from(
+            row.try_get::<i64, _>("total")
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
+        )
+        .unwrap_or(u32::MAX);
+        if samples.len() < SAMPLE_EVENT_IDS {
+            samples.push(
+                row.try_get::<String, _>("fid")
+                    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
+            );
+        }
+    }
+    Ok((total, samples))
 }
 
-fn findings_from_rows(rows: Vec<sqlx::postgres::PgRow>) -> Result<RiskFindings, StatusCode> {
-    let mut accumulators: HashMap<&'static str, FindingAccumulator> = HashMap::new();
-    for row in rows {
-        let event_id: String = row
-            .try_get("event_id")
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-        let record: serde_json::Value = row
-            .try_get("record")
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-        let preview_approved: bool = row
-            .try_get("preview_approved")
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-        observe_record(&mut accumulators, event_id, &record, preview_approved);
+fn push_finding_if_at_least(
+    findings: &mut Vec<RiskFinding>,
+    count: u32,
+    samples: Vec<String>,
+    code: &'static str,
+    tier: &'static str,
+    reason_codes: &[&'static str],
+    reviewer_guidance: &'static str,
+) {
+    if count >= 1 {
+        findings.push(RiskFinding {
+            code,
+            tier,
+            observed_count: count,
+            reason_codes: reason_codes.to_vec(),
+            event_ids: samples,
+            reviewer_guidance,
+        });
     }
+}
 
-    let mut findings = Vec::new();
-    push_finding(
-        &mut findings,
-        &accumulators,
-        "clock_skew_observed",
-        "review",
-        &["CLOCK_SKEW"],
-        "Compare the event sequence with independent records before relying on its durations. Do not take automatic action.",
-    );
-    push_finding(
-        &mut findings,
-        &accumulators,
-        "concurrent_sessions_observed",
-        "observe",
-        &["CONCURRENT_SESSION"],
-        "Confirm that concurrent intervals were unioned rather than summed. This signal alone does not establish inflated activity.",
-    );
+async fn findings_for_user(state: &AppState, user_id: i64) -> Result<RiskFindings, StatusCode> {
+    let mut findings: Vec<RiskFinding> = Vec::new();
+
+    // Always-on: unresolved episodes with >= 3 attempts.
+    let (count, samples) = bounded_counts(
+        state,
+        "SELECT id::TEXT AS fid, COUNT(*) OVER() AS total \
+         FROM productive_episodes \
+         WHERE user_id = $1 AND resolved = FALSE AND attempts >= 3 \
+         ORDER BY started_at DESC \
+         LIMIT $2",
+        user_id,
+    )
+    .await?;
     push_finding_if_at_least(
         &mut findings,
-        &accumulators,
-        "repeated_failures_observed",
-        3,
-        "observe",
-        &["REPEATED_FAILURE"],
-        "Review the derived sequence for a genuine recovery loop; repeated failures can be normal development work.",
+        count,
+        samples,
+        "unresolved_attempts",
+        "review",
+        &["UNRESOLVED_ATTEMPTS"],
+        "Review whether repeated unresolved episodes reflect a genuine recovery loop or abandoned work.",
     );
-    push_finding(
+
+    // Always-on: overlapping episode sessions for the same user.
+    let (count, samples) = bounded_counts(
+        state,
+        "SELECT p1.id::TEXT AS fid, COUNT(*) OVER() AS total \
+         FROM productive_episodes p1 \
+         JOIN productive_episodes p2 \
+           ON p1.user_id = p2.user_id AND p1.id < p2.id \
+          AND p1.started_at < p2.ended_at AND p2.started_at < p1.ended_at \
+         WHERE p1.user_id = $1 \
+         ORDER BY p1.started_at DESC \
+         LIMIT $2",
+        user_id,
+    )
+    .await?;
+    push_finding_if_at_least(
         &mut findings,
-        &accumulators,
+        count,
+        samples,
+        "overlapping_sessions",
+        "review",
+        &["OVERLAPPING_SESSIONS"],
+        "Confirm overlapping intervals were unioned rather than summed; overlapping sessions can inflate credited time.",
+    );
+
+    // Always-on: clock skew where an episode ended more than 5 minutes after it was recorded.
+    let (count, samples) = bounded_counts(
+        state,
+        "SELECT id::TEXT AS fid, COUNT(*) OVER() AS total \
+         FROM productive_episodes \
+         WHERE user_id = $1 AND ended_at > created_at + interval '5 minutes' \
+         ORDER BY started_at DESC \
+         LIMIT $2",
+        user_id,
+    )
+    .await?;
+    push_finding_if_at_least(
+        &mut findings,
+        count,
+        samples,
+        "clock_skew",
+        "review",
+        &["CLOCK_SKEW"],
+        "Compare the episode timeline with independent records before relying on its durations.",
+    );
+
+    // Always-on: metronomic prompt cadence (coefficient of variation < 0.1 over >= 30 gaps).
+    let (count, samples) = bounded_counts(
+        state,
+        "WITH ordered AS (\
+             SELECT user_id, session_id, occurred_at,\
+                    EXTRACT(EPOCH FROM (occurred_at - LAG(occurred_at) OVER (\
+                        PARTITION BY user_id, session_id ORDER BY occurred_at))) AS gap_secs\
+             FROM prompt_events WHERE user_id = $1\
+         ), gaps AS (\
+             SELECT user_id, session_id, gap_secs FROM ordered WHERE gap_secs IS NOT NULL\
+         ), stats AS (\
+             SELECT user_id, session_id, COUNT(*) AS n, AVG(gap_secs) AS mean,\
+                    STDDEV_POP(gap_secs) AS stddev\
+             FROM gaps GROUP BY user_id, session_id HAVING COUNT(*) >= 30\
+         )\
+         SELECT session_id AS fid, COUNT(*) OVER() AS total\
+         FROM stats\
+         WHERE mean > 0 AND stddev / mean < 0.1\
+         ORDER BY n DESC, session_id\
+         LIMIT $2",
+        user_id,
+    )
+    .await?;
+    push_finding_if_at_least(
+        &mut findings,
+        count,
+        samples,
+        "metronomic_cadence",
+        "review",
+        &["METRONOMIC_CADENCE"],
+        "An unusually regular prompt cadence can indicate scripted or automated activity; confirm with independent records.",
+    );
+
+    // Always-on: commit SHA credited to more than one user (cross-user dedupe).
+    let (count, samples) = bounded_counts(
+        state,
+        "SELECT c.sha AS fid, COUNT(*) OVER() AS total \
+         FROM commits c \
+         WHERE c.user_id = $1 \
+           AND EXISTS (SELECT 1 FROM commits c2 WHERE c2.sha = c.sha AND c2.user_id <> c.user_id) \
+         ORDER BY c.pushed_at DESC NULLS LAST \
+         LIMIT $2",
+        user_id,
+    )
+    .await?;
+    push_finding_if_at_least(
+        &mut findings,
+        count,
+        samples,
+        "cross_user_commit_dedupe",
+        "review",
+        &["CROSS_USER_COMMIT_DEDUPE"],
+        "A commit SHA credited to more than one user indicates an attribution problem; verify ownership before relying on it.",
+    );
+
+    // Opt-in: evidence bundle that was never preview-approved.
+    let (count, samples) = bounded_counts(
+        state,
+        "SELECT e.event_id AS fid, COUNT(*) OVER() AS total \
+         FROM evidence_bundle_events e \
+         JOIN evidence_bundles b ON b.id = e.bundle_id \
+         WHERE b.user_id = $1 AND b.preview_approved = FALSE \
+         ORDER BY e.occurred_at DESC, e.id DESC \
+         LIMIT $2",
+        user_id,
+    )
+    .await?;
+    push_finding_if_at_least(
+        &mut findings,
+        count,
+        samples,
         "unpreviewed_export",
         "info",
         &["PREVIEW_NOT_APPROVED"],
@@ -154,96 +269,10 @@ fn findings_from_rows(rows: Vec<sqlx::postgres::PgRow>) -> Result<RiskFindings, 
     let tier = findings.first().map_or("none", |finding| finding.tier);
     Ok(RiskFindings {
         disposition: "manual_review_only_no_automatic_enforcement",
-        data_source: "opt-in derived evidence only; no prompt text, GitHub lookup, or population-level data",
+        data_source: "always-on synced derived data (episodes, prompts, commits) plus opt-in redacted evidence bundles; reviewer-only IDs, no prompt text, code, paths, or population-level enforcement",
         tier,
         findings,
     })
-}
-
-fn observe_record(
-    accumulators: &mut HashMap<&'static str, FindingAccumulator>,
-    event_id: String,
-    record: &serde_json::Value,
-    preview_approved: bool,
-) {
-    if !preview_approved {
-        accumulators
-            .entry("unpreviewed_export")
-            .or_default()
-            .observe(event_id.clone());
-    }
-    let Some(reason_codes) = record
-        .get("reason_codes")
-        .and_then(serde_json::Value::as_array)
-    else {
-        return;
-    };
-    for code in reason_codes.iter().filter_map(serde_json::Value::as_str) {
-        let finding = match code {
-            "CLOCK_SKEW" => Some("clock_skew_observed"),
-            "CONCURRENT_SESSION" => Some("concurrent_sessions_observed"),
-            "REPEATED_FAILURE" => Some("repeated_failures_observed"),
-            _ => None,
-        };
-        if let Some(finding) = finding {
-            accumulators
-                .entry(finding)
-                .or_default()
-                .observe(event_id.clone());
-        }
-    }
-}
-
-fn push_finding(
-    findings: &mut Vec<RiskFinding>,
-    accumulators: &HashMap<&'static str, FindingAccumulator>,
-    code: &'static str,
-    tier: &'static str,
-    reason_codes: &[&'static str],
-    reviewer_guidance: &'static str,
-) {
-    push_finding_if_at_least(
-        findings,
-        accumulators,
-        code,
-        1,
-        tier,
-        reason_codes,
-        reviewer_guidance,
-    );
-}
-
-fn push_finding_if_at_least(
-    findings: &mut Vec<RiskFinding>,
-    accumulators: &HashMap<&'static str, FindingAccumulator>,
-    code: &'static str,
-    minimum: u32,
-    tier: &'static str,
-    reason_codes: &[&'static str],
-    reviewer_guidance: &'static str,
-) {
-    if let Some(value) = accumulators
-        .get(code)
-        .filter(|value| value.count >= minimum)
-    {
-        findings.push(RiskFinding {
-            code,
-            tier,
-            observed_count: value.count,
-            reason_codes: reason_codes.to_vec(),
-            event_ids: value.event_ids.clone(),
-            reviewer_guidance,
-        });
-    }
-}
-
-fn tier_rank(tier: &str) -> u8 {
-    match tier {
-        "review" => 3,
-        "observe" => 2,
-        "info" => 1,
-        _ => 0,
-    }
 }
 
 async fn current_user_id(state: &AppState, headers: &HeaderMap) -> Result<i64, StatusCode> {
@@ -274,37 +303,111 @@ async fn require_admin(state: &AppState, headers: &HeaderMap) -> Result<(), Stat
     }
 }
 
+fn tier_rank(tier: &str) -> u8 {
+    match tier {
+        "review" => 3,
+        "observe" => 2,
+        "info" => 1,
+        _ => 0,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn findings_are_conservative_and_review_only() {
-        let rows = Vec::new();
-        let result = findings_from_rows(rows);
-        assert!(result.is_ok());
-        if let Ok(result) = result {
-            assert_eq!(result.tier, "none");
-            assert_eq!(
-                result.disposition,
-                "manual_review_only_no_automatic_enforcement"
-            );
+    /// Coefficient of variation (stddev / mean) over a sequence of gaps.
+    /// Returns `None` when there are no gaps or the mean is zero. The SQL path
+    /// additionally requires at least 30 gaps before a session can be flagged
+    /// as metronomic.
+    fn cadence_cv(gaps: &[f64]) -> Option<f64> {
+        if gaps.is_empty() {
+            return None;
         }
+        let mean = gaps.iter().sum::<f64>() / gaps.len() as f64;
+        if mean <= 0.0 {
+            return None;
+        }
+        let variance = gaps.iter().map(|gap| (gap - mean).powi(2)).sum::<f64>() / gaps.len() as f64;
+        let stddev = variance.sqrt();
+        Some(stddev / mean)
+    }
+
+    fn finding_when_at_least(
+        count: u32,
+        samples: Vec<String>,
+        code: &'static str,
+        tier: &'static str,
+        reason_codes: &[&'static str],
+        guidance: &'static str,
+        minimum: u32,
+    ) -> Option<RiskFinding> {
+        (count >= minimum).then_some(RiskFinding {
+            code,
+            tier,
+            observed_count: count,
+            reason_codes: reason_codes.to_vec(),
+            event_ids: samples,
+            reviewer_guidance: guidance,
+        })
     }
 
     #[test]
-    fn maps_only_closed_reason_codes() {
-        let mut values = HashMap::new();
-        observe_record(
-            &mut values,
-            "event-1".into(),
-            &serde_json::json!({"reason_codes":["CLOCK_SKEW", "UNTRUSTED_TEXT"]}),
-            true,
+    fn findings_are_conservative_and_review_only() {
+        let findings: Vec<RiskFinding> = Vec::new();
+        let tier = findings.first().map_or("none", |finding| finding.tier);
+        assert_eq!(tier, "none");
+    }
+
+    #[test]
+    fn cadence_cv_detects_metronomic_gaps() {
+        assert_eq!(cadence_cv(&[60.0, 60.0, 60.0, 60.0]), Some(0.0));
+    }
+
+    #[test]
+    fn cadence_cv_flags_irregular_gaps() {
+        let cv = cadence_cv(&[60.0, 120.0, 30.0, 90.0]).unwrap_or(0.0);
+        assert!(cv >= 0.1);
+    }
+
+    #[test]
+    fn cadence_cv_empty_returns_none() {
+        assert_eq!(cadence_cv(&[]), None);
+    }
+
+    #[test]
+    fn finding_emits_only_when_at_least_threshold() {
+        let emitted = finding_when_at_least(
+            5,
+            vec!["ep-1".into()],
+            "unresolved_attempts",
+            "review",
+            &["UNRESOLVED_ATTEMPTS"],
+            "guidance",
+            3,
         );
         assert_eq!(
-            values.get("clock_skew_observed").map(|item| item.count),
-            Some(1)
+            emitted.as_ref().map(|finding| finding.observed_count),
+            Some(5)
         );
-        assert!(!values.contains_key("UNTRUSTED_TEXT"));
+        assert!(emitted.is_some());
+
+        let not_emitted = finding_when_at_least(
+            2,
+            vec!["ep-1".into()],
+            "unresolved_attempts",
+            "review",
+            &["UNRESOLVED_ATTEMPTS"],
+            "guidance",
+            3,
+        );
+        assert!(not_emitted.is_none());
+    }
+
+    #[test]
+    fn tier_orders_review_before_observe_before_info() {
+        assert!(tier_rank("review") > tier_rank("observe"));
+        assert!(tier_rank("observe") > tier_rank("info"));
+        assert_eq!(tier_rank("unknown"), 0);
     }
 }

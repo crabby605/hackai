@@ -133,6 +133,10 @@ fn derive_event(
         "HumanEdit" => "fs_watch",
         _ => "transcript",
     };
+    let role = payload
+        .get("role")
+        .and_then(Value::as_str)
+        .unwrap_or("Unknown");
     let mut event = json!({
         "event_id": format!("evt-{}", &hash_text(id)[..32]),
         "ts_utc_ms": occurred_at,
@@ -141,6 +145,7 @@ fn derive_event(
         "harness": harness,
         "event_kind": event_kind,
         "session_id_hash": hash_text(session),
+        "authorship": authorship_for_role(role),
         "reason_codes": reason_codes(kind, payload),
     });
     if let Some(project) = payload.get("project").and_then(Value::as_str) {
@@ -206,6 +211,17 @@ fn reason_codes(kind: &str, payload: &Value) -> Vec<&'static str> {
     }
 }
 
+/// Map a stored actor role to typed export authorship.  Only positive human or
+/// agent evidence is labelled; everything else (including Unknown and Harness)
+/// is unknown.
+fn authorship_for_role(role: &str) -> &'static str {
+    match role {
+        "Human" => "human",
+        "Agent" => "agent",
+        _ => "unknown",
+    }
+}
+
 fn hash_text(value: &str) -> String {
     hash_bytes(value.as_bytes())
 }
@@ -223,6 +239,7 @@ fn processor_hash() -> String {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::derive_event;
     use serde_json::json;
@@ -257,6 +274,78 @@ mod tests {
                 0
             )
             .is_none()
+        );
+    }
+
+    #[test]
+    fn derived_event_carries_typed_authorship() {
+        let agent = derive_event(
+            "id",
+            1,
+            "ClaudeCode",
+            "session",
+            &json!({"kind":"GitCommit","role":"Agent"}),
+            0,
+        )
+        .unwrap();
+        assert_eq!(agent["authorship"], "agent");
+
+        let human = derive_event(
+            "id",
+            1,
+            "ClaudeCode",
+            "session",
+            &json!({"kind":"GitCommit","role":"Human"}),
+            0,
+        )
+        .unwrap();
+        assert_eq!(human["authorship"], "human");
+
+        let unknown = derive_event(
+            "id",
+            1,
+            "ClaudeCode",
+            "session",
+            &json!({"kind":"GitCommit","role":"Unknown"}),
+            0,
+        )
+        .unwrap();
+        assert_eq!(unknown["authorship"], "unknown");
+
+        // Missing role defaults to unknown, never human.
+        let missing = derive_event(
+            "id",
+            1,
+            "ClaudeCode",
+            "session",
+            &json!({"kind":"GitCommit"}),
+            0,
+        )
+        .unwrap();
+        assert_eq!(missing["authorship"], "unknown");
+    }
+
+    #[test]
+    fn derived_event_contains_no_raw_command_or_sha() {
+        let event = derive_event(
+            "id",
+            1,
+            "ClaudeCode",
+            "session",
+            &json!({
+                "kind": "GitCommit",
+                "role": "Agent",
+                "commit": {"sha": "0000000000000000000000000000000000000000000000000000000000000000"},
+                "change": {"human_added": 5}
+            }),
+            0,
+        )
+        .unwrap();
+        let encoded = serde_json::to_string(&event).unwrap();
+        assert!(!encoded.contains("sha"));
+        assert!(!encoded.contains("command"));
+        assert!(
+            !encoded.contains("0000000000000000000000000000000000000000000000000000000000000000")
         );
     }
 }
