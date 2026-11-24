@@ -9,7 +9,7 @@ serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 sha2 = "0.10"
-rusqlite = { version = "0.34", default-features = false }
+rusqlite = { version = "0.43", default-features = false }
 [dev-dependencies]
 proptest.workspace = true
 [lints]

@@ -40,7 +40,7 @@ jobs:
             artifact: hackai-macos-aarch64
           - target: x86_64-pc-windows-msvc
             os: windows-latest
-            artifact: hackai-windows-x86_64
+            artifact: hackai-windows-x86_64.exe
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -67,30 +67,30 @@ jobs:
         if: matrix.cross == 'true'
         run: cross build --release --no-default-features --bin hackai --target ${{ matrix.target }}
 
-      - name: Package (Unix)
+      - name: Package binaries (Unix)
         if: matrix.os != 'windows-latest'
         run: |
-          mkdir -p dist/${{ matrix.artifact }}
-          cp target/${{ matrix.target }}/release/hackai dist/${{ matrix.artifact }}/
-          cd dist/${{ matrix.artifact }}
-          tar -czf ../${{ matrix.artifact }}.tar.gz hackai
-          sha256sum ../${{ matrix.artifact }}.tar.gz > ../${{ matrix.artifact }}.tar.gz.sha256
+          mkdir -p dist/archives/${{ matrix.artifact }}
+          cp target/${{ matrix.target }}/release/hackai dist/${{ matrix.artifact }}
+          cp target/${{ matrix.target }}/release/hackai dist/archives/${{ matrix.artifact }}/hackai
+          tar -czf dist/archives/${{ matrix.artifact }}.tar.gz -C dist/archives/${{ matrix.artifact }} hackai
+          sha256sum dist/${{ matrix.artifact }} | awk '{print $1}' > dist/${{ matrix.artifact }}.sha256
+          sha256sum dist/archives/${{ matrix.artifact }}.tar.gz | awk '{print $1}' > dist/archives/${{ matrix.artifact }}.tar.gz.sha256
 
-      - name: Package (Windows)
+      - name: Package binaries (Windows)
         if: matrix.os == 'windows-latest'
         run: |
-          mkdir dist/${{ matrix.artifact }}
-          cp target/${{ matrix.target }}/release/hackai.exe dist/${{ matrix.artifact }}/
-          cd dist/${{ matrix.artifact }}
-          7z a ../${{ matrix.artifact }}.zip hackai.exe
-          cd ..
-          powershell -NoProfile -Command "(Get-FileHash '${{ matrix.artifact }}.zip' -Algorithm SHA256).Hash.ToLower() + '  ${{ matrix.artifact }}.zip' | Out-File -Encoding ascii '${{ matrix.artifact }}.zip.sha256'"
+          mkdir -p dist/archives/hackai-windows-x86_64
+          cp target/${{ matrix.target }}/release/hackai.exe dist/${{ matrix.artifact }}
+          cp target/${{ matrix.target }}/release/hackai.exe dist/archives/hackai-windows-x86_64/hackai.exe
+          7z a dist/archives/hackai-windows-x86_64.zip dist/archives/hackai-windows-x86_64/hackai.exe
+          powershell -NoProfile -Command "(Get-FileHash 'dist\\${{ matrix.artifact }}' -Algorithm SHA256).Hash.ToLower() | Out-File -Encoding ascii 'dist\\${{ matrix.artifact }}.sha256'; (Get-FileHash 'dist\\archives\\hackai-windows-x86_64.zip' -Algorithm SHA256).Hash.ToLower() | Out-File -Encoding ascii 'dist\\archives\\hackai-windows-x86_64.zip.sha256'"
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact }}
-          path: dist/${{ matrix.artifact }}/*
+          path: dist/
           retention-days: 1
 
   release:
@@ -111,7 +111,7 @@ jobs:
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/*
+          files: dist/**/*
           tag_name: ${{ inputs.version || github.ref_name }}
           generate_release_notes: true
           draft: false
@@ -137,32 +137,3 @@ jobs:
         with:
           files: scripts/install-cli.sh
           tag_name: ${{ inputs.version || github.ref_name }}
-
-  # Optional: Publish to package managers
-  # homebrew:
-  #   name: Update Homebrew Formula
-  #   needs: release
-  #   runs-on: ubuntu-latest
-  #   if: startsWith(github.ref, 'refs/tags/') && !contains(github.ref, '-')
-  #   steps:
-  #     - uses: actions/checkout@v4
-  #     - name: Update Homebrew
-  #       uses: mislav/bump-homebrew-formula-action@v3
-  #       with:
-  #         formula-name: hackai
-  #         formula-path: Formula/hackai.rb
-  #         tap-repo: hackclub/homebrew-tap
-  #         token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
-
-  # scoop:
-  #   name: Update Scoop Manifest
-  #   needs: release
-  #   runs-on: ubuntu-latest
-  #   if: startsWith(github.ref, 'refs/tags/') && !contains(github.ref, '-')
-  #   steps:
-  #     - uses: actions/checkout@v4
-  #     - name: Update Scoop
-  #       run: |
-  #         # Update bucket manifest
-  #       env:
-  #         SCOOP_BUCKET_TOKEN: ${{ secrets.SCOOP_BUCKET_TOKEN }}

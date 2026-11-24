@@ -57,11 +57,10 @@ async fn per_ip_rate_limit(
 ) -> Response {
     let ip = auth::client_ip(request.headers());
     let now = Instant::now();
-    let allowed = state
-        .ip_rate_limits
-        .lock()
-        .ok()
-        .map(|mut limits| {
+
+    // Fail closed if mutex is poisoned
+    let allowed = match state.ip_rate_limits.lock() {
+        Ok(mut limits) => {
             let calls = limits.entry(ip.clone()).or_default();
             while calls
                 .front()
@@ -75,8 +74,17 @@ async fn per_ip_rate_limit(
                 calls.push_back(now);
                 true
             }
-        })
-        .unwrap_or(true);
+        }
+        Err(_) => {
+            // Mutex poisoned - fail closed
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                [("retry-after", "1")],
+                "rate limiter unavailable",
+            )
+                .into_response();
+        }
+    };
     if !allowed {
         return (
             StatusCode::TOO_MANY_REQUESTS,
@@ -85,17 +93,15 @@ async fn per_ip_rate_limit(
         )
             .into_response();
     }
+
     let is_admin_mutation = request.uri().path().starts_with("/api/v1/admin/")
         && matches!(
             request.method(),
             &axum::http::Method::POST | &axum::http::Method::DELETE
         );
     if is_admin_mutation {
-        let allowed = state
-            .admin_mutation_rate_limits
-            .lock()
-            .ok()
-            .map(|mut limits| {
+        let allowed = match state.admin_mutation_rate_limits.lock() {
+            Ok(mut limits) => {
                 let calls = limits.entry(ip).or_default();
                 while calls
                     .front()
@@ -109,8 +115,17 @@ async fn per_ip_rate_limit(
                     calls.push_back(now);
                     true
                 }
-            })
-            .unwrap_or(true);
+            }
+            Err(_) => {
+                // Mutex poisoned - fail closed
+                return (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    [("retry-after", "60")],
+                    "admin rate limiter unavailable",
+                )
+                    .into_response();
+            }
+        };
         if !allowed {
             return (
                 StatusCode::TOO_MANY_REQUESTS,
@@ -1072,7 +1087,12 @@ async fn main() {
             return;
         }
     };
-    if let Err(error) = axum::serve(listener, app).await {
+    if let Err(error) = axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .await
+    {
         eprintln!("server failed: {error}");
     }
 }

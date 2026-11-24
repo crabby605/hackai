@@ -44,9 +44,10 @@ jobs:
         run: cargo test --workspace
 
       - name: Security audit (allowed to fail on known issues)
+        continue-on-error: true
         run: |
-          cargo install cargo-audit
-          cargo audit --ignore RUSTSEC-2026-0459 --ignore RUSTSEC-2026-0370 --ignore RUSTSEC-2026-0371 --ignore RUSTSEC-2026-0372 || true
+          which cargo-audit || cargo install cargo-audit
+          cargo audit || true
         shell: bash
 
   web:

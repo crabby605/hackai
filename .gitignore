@@ -9,6 +9,7 @@
 /ml/*.local.jsonl
 web/.dev.vars
 web/.next/
+.next/
 .DS_Store
 web/node_modules/
 web/.open-next/
@@ -21,6 +22,10 @@ web/.wrangler/
 *.db-shm
 *.pem
 *.key
+*.tsbuildinfo
+coverage/
+.turbo/
+*.log
 
 # Keep the project overview and documentation readmes; nested package/tool
 # readmes are generated or vendor material unless explicitly added later.

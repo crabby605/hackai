@@ -56,7 +56,7 @@ pub enum Outcome {
 
 pub fn process(root: &Path) -> io::Result<ProcessorOutput> {
     let events = read_events(root)?;
-    let config = FormulaConfig::default();
+    let config = load_formula(root)?;
     let mut grouped: BTreeMap<String, Vec<NormalizedEvent<String, String>>> = BTreeMap::new();
     for event in events {
         grouped
@@ -119,6 +119,24 @@ pub fn process(root: &Path) -> io::Result<ProcessorOutput> {
         event_count: episodes.iter().map(|episode| episode.event_count).sum(),
         dialogue_turns: turns,
         episodes,
+    })
+}
+
+/// Load the versioned policy checked into the project. Falling back to the
+/// compiled defaults keeps existing installations usable until they opt in;
+/// an explicitly supplied but invalid policy is always an error so a score is
+/// never silently computed under a different policy than the reviewer sees.
+fn load_formula(root: &Path) -> io::Result<FormulaConfig> {
+    let path = root.join("formula.toml");
+    if !path.exists() {
+        return Ok(FormulaConfig::default());
+    }
+    let source = fs::read_to_string(&path)?;
+    toml::from_str(&source).map_err(|error| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("invalid {}: {error}", path.display()),
+        )
     })
 }
 
@@ -208,7 +226,10 @@ fn analyze_agent_reply(
 
     // Detect if agent asked a question by checking the last agent annotation
     // We check if the last agent event was an annotation and the one before that was a tool result
-    let agent_events: Vec<_> = events.iter().filter(|e| e.role == ActorRole::Agent).collect();
+    let agent_events: Vec<_> = events
+        .iter()
+        .filter(|e| e.role == ActorRole::Agent)
+        .collect();
     if let Some(last_agent) = agent_events.last()
         && last_agent.kind == EventKind::Annotation
     {
@@ -532,45 +553,7 @@ fn label_episode(
         }
 
         // Analyze the agent's reply since the last prompt
-        let (had_plan, had_explanation, agent_asked_question, claimed_done, tool_errors, looping) =
-            analyze_agent_reply(&since_prompt);
-
-        // Determine agent state from the reply
-        let agent_state = if looping {
-            AgentState::Looping
-        } else if tool_errors > 0 {
-            AgentState::ToolError
-        } else if claimed_done {
-            // Check if there were verification signals (tests)
-            let has_verification = since_prompt.iter().any(|e| {
-                e.tool.as_ref().is_some_and(|t| {
-                    matches!(
-                        t.class,
-                        ToolClass::Test | ToolClass::Build | ToolClass::Lint
-                    )
-                })
-            });
-            if has_verification {
-                // Verification outcome determined in agent_state() below
-                AgentState::EditedUnverified // Will be refined by agent_state()
-            } else {
-                AgentState::ClaimedDoneUnverified
-            }
-        } else if had_plan {
-            AgentState::Planned
-        } else if had_explanation {
-            AgentState::Explained
-        } else if agent_asked_question {
-            AgentState::Asked
-        } else if since_prompt
-            .iter()
-            .any(|e| e.kind == EventKind::ToolStarted)
-        {
-            AgentState::EditedUnverified
-        } else {
-            AgentState::Blocked
-        };
-        let _ = agent_state; // unused, refined by determine_agent_state
+        let (_, _, agent_asked_question, _, _, _) = analyze_agent_reply(&since_prompt);
 
         // Now get the refined agent state with verification
         let (refined_agent_state, verification, files_changed_bucket, refined_tool_errors, reasons) =
@@ -757,185 +740,6 @@ fn confidence_for_act(act: UserAct, prompt: Option<&hackai_schema::PromptFeature
     }
 }
 
-#[allow(dead_code)] // Legacy function, replaced by determine_agent_state
-fn agent_state(
-    events: &[&NormalizedEvent<String, String>],
-) -> Option<(AgentState, VerificationState, u8, u16, Vec<String>)> {
-    let tool_errors = u16::try_from(
-        events
-            .iter()
-            .filter(|event| {
-                event
-                    .tool
-                    .as_ref()
-                    .and_then(|tool| tool.exit_code)
-                    .is_some_and(|code| code != 0)
-            })
-            .count(),
-    )
-    .unwrap_or(u16::MAX);
-
-    let has_red = events.iter().any(|event| {
-        event.tool.as_ref().is_some_and(|tool| {
-            matches!(
-                tool.class,
-                ToolClass::Test | ToolClass::Build | ToolClass::Lint
-            ) && tool.exit_code.is_some_and(|code| code != 0)
-        })
-    });
-
-    let has_green = events.iter().any(|event| {
-        event.tool.as_ref().is_some_and(|tool| {
-            matches!(
-                tool.class,
-                ToolClass::Test | ToolClass::Build | ToolClass::Lint
-            ) && tool.exit_code == Some(0)
-        })
-    });
-
-    let writes = events
-        .iter()
-        .filter(|event| {
-            event.tool.as_ref().is_some_and(|tool| {
-                matches!(tool.class, ToolClass::FileWrite | ToolClass::FilePatch)
-            })
-        })
-        .count();
-
-    let files_changed_bucket = u8::try_from(writes.min(255)).unwrap_or(u8::MAX);
-
-    // Detect looping: same failing tool repeated
-    let mut tool_class_fail_counts: HashMap<ToolClass, u16> = HashMap::new();
-    for event in events {
-        if let Some(tool) = &event.tool
-            && matches!(
-                tool.class,
-                ToolClass::Test | ToolClass::Build | ToolClass::Lint
-            )
-            && tool.exit_code.is_some_and(|c| c != 0)
-        {
-            *tool_class_fail_counts.entry(tool.class).or_default() += 1;
-        }
-    }
-    let looping = tool_class_fail_counts.values().any(|&c| c >= 2);
-
-    if looping {
-        return Some((
-            AgentState::Looping,
-            VerificationState::Red,
-            files_changed_bucket,
-            tool_errors,
-            vec!["REPEATED_FAILURE".into()],
-        ));
-    }
-
-    if has_red {
-        return Some((
-            AgentState::EditedRed,
-            VerificationState::Red,
-            files_changed_bucket,
-            tool_errors,
-            vec!["VERIFICATION_RED".into()],
-        ));
-    }
-
-    if writes > 0 && has_green {
-        return Some((
-            AgentState::EditedGreen,
-            VerificationState::Green,
-            files_changed_bucket,
-            tool_errors,
-            vec!["EDIT_VERIFIED_GREEN".into()],
-        ));
-    }
-
-    if writes > 0 {
-        // Check if agent claimed done (no more tool activity after writes)
-        let last_tool_idx = events.iter().rposition(|e| e.tool.is_some());
-        let claimed_done = last_tool_idx.is_some_and(|idx| {
-            events[idx + 1..]
-                .iter()
-                .all(|e| !matches!(e.kind, EventKind::ToolStarted | EventKind::ToolFinished))
-        });
-
-        if claimed_done {
-            return Some((
-                AgentState::ClaimedDoneUnverified,
-                VerificationState::Unverified,
-                files_changed_bucket,
-                tool_errors,
-                vec!["CLAIMED_DONE_UNVERIFIED".into()],
-            ));
-        }
-
-        return Some((
-            AgentState::EditedUnverified,
-            VerificationState::Unverified,
-            files_changed_bucket,
-            tool_errors,
-            vec!["EDIT_UNVERIFIED".into()],
-        ));
-    }
-
-    if tool_errors > 0 {
-        return Some((
-            AgentState::ToolError,
-            VerificationState::NotApplicable,
-            0,
-            tool_errors,
-            vec!["TOOL_ERROR".into()],
-        ));
-    }
-
-    // Check for planning/explanation signals
-    let had_plan = events.iter().any(|e| {
-        e.kind == EventKind::ToolStarted
-            && e.tool.as_ref().is_some_and(|t| t.class == ToolClass::Other)
-    });
-    let had_explanation = events.iter().any(|e| e.kind == EventKind::Annotation);
-
-    if had_plan {
-        return Some((
-            AgentState::Planned,
-            VerificationState::NotApplicable,
-            0,
-            0,
-            vec!["PLAN_EMITTED".into()],
-        ));
-    }
-
-    if had_explanation {
-        return Some((
-            AgentState::Explained,
-            VerificationState::NotApplicable,
-            0,
-            0,
-            vec!["EXPLANATION_EMITTED".into()],
-        ));
-    }
-
-    // Check if agent asked a question (hard without raw text)
-    // Heuristic: agent turn with no tools and no edits
-    let agent_turns: Vec<_> = events
-        .iter()
-        .filter(|e| e.role == ActorRole::Agent)
-        .collect();
-    if let Some(last_agent) = agent_turns.last()
-        && last_agent.tool.is_none()
-        && writes == 0
-    {
-        return Some((
-            AgentState::Asked,
-            VerificationState::NotApplicable,
-            0,
-            0,
-            vec!["AGENT_ASKED_QUESTION".into()],
-        ));
-    }
-
-    None
-}
-
 fn information_bucket(prompt: Option<&hackai_schema::PromptFeatures>) -> InformationBucket {
     match prompt {
         Some(features) if features.has_attachment || features.has_code_fence => {
@@ -1000,11 +804,14 @@ fn episode_id(session: &str, started_at: i64) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{agent_state, classify_user_act, detect_failure_context, information_bucket};
+    use super::{
+        classify_user_act, detect_failure_context, determine_agent_state, information_bucket,
+    };
     use hackai_schema::{
         ActorRole, AgentState, EventId, EventKind, EventSource, NormalizedEvent, PromptFeatures,
         ToolFeatures, UnixMillis, UserAct, VerificationState,
     };
+    use hackai_scorer::{FormulaConfig, OutcomeMode};
 
     fn event(kind: EventKind) -> NormalizedEvent<String, String> {
         NormalizedEvent {
@@ -1036,16 +843,10 @@ mod tests {
             is_steering: false,
             output_low_entropy: false,
         });
-        let labeled = agent_state(&[&write]);
+        let (state, verification, ..) = determine_agent_state(&[&write]);
         // With a single write and no follow-up tools, agent claims done
-        assert!(matches!(
-            labeled,
-            Some((
-                hackai_schema::AgentState::ClaimedDoneUnverified,
-                hackai_schema::VerificationState::Unverified,
-                ..
-            ))
-        ));
+        assert_eq!(state, hackai_schema::AgentState::ClaimedDoneUnverified);
+        assert_eq!(verification, hackai_schema::VerificationState::Unverified);
     }
 
     #[test]
@@ -1134,5 +935,17 @@ mod tests {
         assert!(!ctx.expectation);
         assert!(!ctx.location);
         assert!(ctx.is_contextless());
+    }
+
+    #[test]
+    fn checked_in_formula_is_a_v1_gate_policy() {
+        let parsed: Result<FormulaConfig, _> =
+            toml::from_str(include_str!("../../../formula.toml"));
+        assert!(parsed.is_ok(), "formula.toml must parse");
+        if let Ok(config) = parsed {
+            assert_eq!(config.version, 1);
+            assert_eq!(config.pesdo.outcome.mode, OutcomeMode::Gate);
+            assert_eq!(config.transition_rules.len(), 4);
+        }
     }
 }

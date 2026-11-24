@@ -136,17 +136,17 @@ async fn complete_pairing(
     }
 
     let (token, token_hash) = issue_token();
-    // ponytail: plaintext installation token sits in cli_pairings.token until the
-    // CLI's first poll; upgrade to encrypted-at-rest or delivery via the approval page.
 
+    // Store only the token hash in cli_pairings; return plaintext token directly
+    // in the response (delivered over authenticated TLS channel to the browser).
     let approved = sqlx::query(
         "UPDATE cli_pairings \
-             SET user_id = $1, status = 'approved', completed_at = now(), token = $2 \
+             SET user_id = $1, status = 'approved', completed_at = now(), token_hash = $2 \
            WHERE user_code = $3 AND status = 'pending' AND expires_at > now() \
            RETURNING id",
     )
     .bind(user_id)
-    .bind(&token)
+    .bind(token_hash.as_slice())
     .bind(code)
     .fetch_optional(&state.db)
     .await
@@ -157,8 +157,7 @@ async fn complete_pairing(
         return Err(StatusCode::CONFLICT);
     }
 
-    // Keep one active credential per account. Persist only the hash; the raw
-    // token is delivered once via the poll endpoint.
+    // Keep one active credential per account. Persist only the hash.
     sqlx::query("UPDATE api_keys SET revoked_at = now() WHERE user_id = $1 AND revoked_at IS NULL")
         .bind(user_id)
         .execute(&state.db)
@@ -170,7 +169,10 @@ async fn complete_pairing(
         .execute(&state.db)
         .await;
 
-    Ok(Json(serde_json::json!({ "status": "approved" })))
+    // Return plaintext token once to the authenticated browser session.
+    Ok(Json(
+        serde_json::json!({ "status": "approved", "token": token }),
+    ))
 }
 
 async fn pairing_status(
@@ -185,25 +187,20 @@ async fn pairing_status(
     {
         return Err(StatusCode::UNPROCESSABLE_ENTITY);
     }
-    // Deliver the freshly-issued token idempotently during this pairing window.
-    // A second poll can happen when a terminal is restarted or two CLI loops
-    // overlap; losing the token would strand an otherwise approved login.
-    if let Some(row) = sqlx::query(
+
+    // Mark as consumed on first status check after approval; token was already
+    // delivered in the complete_pairing response to the browser.
+    if let Some(_row) = sqlx::query(
         "UPDATE cli_pairings SET consumed_at = COALESCE(consumed_at, now()), status = 'consumed' \
-         WHERE device_code = $1 AND token IS NOT NULL \
-         RETURNING token",
+         WHERE device_code = $1 AND status = 'approved' \
+         RETURNING status",
     )
     .bind(code)
     .fetch_optional(&state.db)
     .await
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
     {
-        let token: String = row
-            .try_get("token")
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-        return Ok(Json(
-            serde_json::json!({ "status": "approved", "token": token }),
-        ));
+        return Ok(Json(serde_json::json!({ "status": "approved" })));
     }
 
     let row = sqlx::query(

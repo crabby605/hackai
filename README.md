@@ -30,6 +30,11 @@ from the repository; it opens the browser pairing flow automatically. `hackai
 login <token>` supports a separately issued API
 token for self-hosted deployments.
 
+To update to the latest release, run `hackai update` (prompts before replacing
+the binary unless `--yes` is passed). Interactive commands also check once a
+day and offer Y/N confirmation. Set `HACKAI_NO_UPDATE_CHECK=1` to disable
+checks. Only binaries installed by the release installer are eligible.
+
 Current verified state:
 
 - `schema`, `paths`, `parser`, and `scorer` compile and have focused tests.

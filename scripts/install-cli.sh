@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # HackAI CLI Installer
-# Usage: curl -fsSL https://raw.githubusercontent.com/hackclub/hackai/main/scripts/install-cli.sh | bash
-#        curl -fsSL https://raw.githubusercontent.com/hackclub/hackai/main/scripts/install-cli.sh | bash -s -- --version v0.1.0
+# Usage: curl -fsSL https://raw.githubusercontent.com/crabby605/hackai/main/scripts/install-cli.sh | bash
+#        curl -fsSL https://raw.githubusercontent.com/crabby605/hackai/main/scripts/install-cli.sh | bash -s -- --version v0.1.0
 
 set -euo pipefail
 
@@ -45,16 +45,16 @@ Environment variables:
 
 Examples:
     # Install latest release
-    curl -fsSL https://raw.githubusercontent.com/hackclub/hackai/main/scripts/install-cli.sh | bash
+    curl -fsSL https://raw.githubusercontent.com/crabby605/hackai/main/scripts/install-cli.sh | bash
 
     # Install specific version
-    curl -fsSL https://raw.githubusercontent.com/hackclub/hackai/main/scripts/install-cli.sh | bash -s -- --version v0.1.0
+    curl -fsSL https://raw.githubusercontent.com/crabby605/hackai/main/scripts/install-cli.sh | bash -s -- --version v0.1.0
 
     # Custom install directory
-    curl -fsSL https://raw.githubusercontent.com/hackclub/hackai/main/scripts/install-cli.sh | INSTALL_DIR=/usr/local/bin bash
+    curl -fsSL https://raw.githubusercontent.com/crabby605/hackai/main/scripts/install-cli.sh | INSTALL_DIR=/usr/local/bin bash
 
     # Install and authenticate the current repository
-    curl -fsSL https://raw.githubusercontent.com/hackclub/hackai/main/scripts/install-cli.sh | bash -s -- --login
+    curl -fsSL https://raw.githubusercontent.com/crabby605/hackai/main/scripts/install-cli.sh | bash -s -- --login
 
 EOF
 }
@@ -246,9 +246,13 @@ install_binary() {
     if [[ "$DRY_RUN" == "true" ]]; then
         log_info "[dry-run] cp $binary_path $target_path"
         log_info "[dry-run] chmod +x $target_path"
+        log_info "[dry-run] touch ${target_path}.release"
     else
         cp "$binary_path" "$target_path"
         chmod +x "$target_path"
+        # Marker file so `hackai update` knows this binary was installed by the
+        # release installer and is eligible for self-update.
+        touch "${target_path}.release"
     fi
 }
 

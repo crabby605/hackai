@@ -1,0 +1,56 @@
+# HackAI scoring policy, version 1.
+#
+# All values are deterministic, integer-only policy inputs. PESD is multiplied
+# in permille using u128 and one final floor division; the O outcome value is a
+# submission gate in this version. Changing this file changes the policy and
+# should be reviewed alongside its version number.
+version = 1
+bucket_millis = 300000
+think_time_cap_millis = 600000
+cold_start_cap_millis = 120000
+heartbeat_timeout_millis = 120000
+episode_gap_millis = 1800000
+stall_info_reset_millis = 300000
+stall_warning_buckets = 2
+stall_zero_buckets = 3
+dark_flow_window_millis = 1800000
+near_duplicate_threshold = 40
+min_read_time_per_line = 2
+large_diff_lines = 50
+cross_machine_bucket_cap_seconds = 300
+daily_review_flag_hours = 10
+
+[pesdo]
+# "gate" means an unverified submission receives zero outcome credit. Change
+# to "soft_factor" only with a policy review; then soft_factor_permille applies.
+outcome = { mode = "gate", soft_factor_permille = 1000 }
+process_delta_limit = 20
+
+[weights]
+driven = 1000
+steered = 850
+directed = 700
+watching = 450
+
+# Ordered: specific rules precede broad rules.
+[[transition_rules]]
+agent_state = "edited_red"
+user_act = "report_failure"
+require_contextless = true
+delta = -2
+
+[[transition_rules]]
+agent_state = "edited_red"
+user_act = "report_failure"
+require_contextless = false
+delta = 2
+
+[[transition_rules]]
+agent_state = "edited_green"
+user_act = "approve"
+delta = 1
+
+[[transition_rules]]
+agent_state = "edited_red"
+user_act = "approve"
+delta = -2

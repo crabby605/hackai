@@ -13,6 +13,7 @@ use axum::{
     response::{IntoResponse, Redirect},
     routing::get,
 };
+use base64::Engine;
 use jsonwebtoken::{
     Algorithm, DecodingKey, EncodingKey, Header, Validation, decode, encode, jwk::JwkSet,
 };
@@ -45,6 +46,9 @@ pub struct AuthState {
     pub issuer: String,
     pub client_id: String,
     pub client_secret: String,
+    /// Dedicated key for signing session cookies (HS256).
+    /// Separate from OIDC client_secret to limit blast radius if leaked.
+    pub session_signing_key: String,
     pub redirect_uri: String,
     pub session_cookie_domain: Option<String>,
     pub authorization_endpoint: String,
@@ -82,7 +86,7 @@ impl AuthState {
                 exp: now.saturating_add(SESSION_TTL_SECONDS as usize),
                 iss: "hackai".to_owned(),
             },
-            &EncodingKey::from_secret(self.client_secret.as_bytes()),
+            &EncodingKey::from_secret(self.session_signing_key.as_bytes()),
         )
         .map_err(|error| AuthError::InvalidToken(format!("session issue: {error}")))
     }
@@ -92,7 +96,7 @@ impl AuthState {
         validation.set_issuer(&["hackai"]);
         decode::<HackaiSessionClaims>(
             token,
-            &DecodingKey::from_secret(self.client_secret.as_bytes()),
+            &DecodingKey::from_secret(self.session_signing_key.as_bytes()),
             &validation,
         )
         .ok()
@@ -107,6 +111,7 @@ impl AuthState {
             issuer: String::new(),
             client_id: String::new(),
             client_secret: String::new(),
+            session_signing_key: String::new(),
             redirect_uri: String::new(),
             session_cookie_domain: None,
             authorization_endpoint: String::new(),
@@ -128,12 +133,19 @@ impl AuthState {
             .unwrap_or_else(|_| "http://localhost:3000/callback".to_string());
         let session_cookie_domain = std::env::var("SESSION_COOKIE_DOMAIN")
             .ok()
-            .filter(|domain| !domain.trim().is_empty())
+            .map(|s| s.trim().to_string())
+            .filter(|domain| !domain.is_empty())
+            .map(|domain| domain.trim_start_matches('.').to_string())
             .filter(|domain| {
-                // Only allow valid domain names, not malicious injection
-                domain.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-')
-                    && !domain.starts_with('.')
+                !domain.is_empty()
+                    && domain
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-')
             });
+        // Dedicated session signing key; separate from OIDC client_secret to limit
+        // blast radius if either is leaked. Must be 32+ random bytes (base64 or hex).
+        let session_signing_key = std::env::var("SESSION_SIGNING_KEY")
+            .map_err(|_| AuthError::Config("SESSION_SIGNING_KEY not set".into()))?;
 
         let discovery: OidcDiscovery = self_client()
             .get(format!("{issuer}/.well-known/openid-configuration"))
@@ -173,6 +185,7 @@ impl AuthState {
             issuer,
             client_id,
             client_secret,
+            session_signing_key,
             redirect_uri,
             session_cookie_domain,
             authorization_endpoint: discovery.authorization_endpoint,
@@ -284,15 +297,18 @@ pub struct TokenResponse {
     pub refresh_token: Option<String>,
 }
 
-const SESSION_COOKIE: &str = "hackai_session";
+const SESSION_COOKIE: &str = "__Host-hackai_session";
 const OIDC_STATE_COOKIE: &str = "hackai_oidc_state";
 
-pub fn session_cookie(id_token: &str, is_https: bool, domain: Option<&str>) -> HeaderMap {
+pub fn session_cookie(id_token: &str, is_https: bool, _domain: Option<&str>) -> HeaderMap {
+    // __Host- prefix requires Secure, Path=/, no Domain attribute
+    if !is_https {
+        eprintln!("ERROR: session cookie requires HTTPS when using __Host- prefix");
+        return HeaderMap::new();
+    }
     let mut headers = HeaderMap::new();
-    let secure_flag = if is_https { "; Secure" } else { "" };
-    let domain_attribute = domain.map_or_else(String::new, |value| format!("; Domain={value}"));
     let value = format!(
-        "{SESSION_COOKIE}={id_token}; Path=/; HttpOnly{secure_flag}; SameSite=Lax; Max-Age={SESSION_TTL_SECONDS}{domain_attribute}"
+        "{SESSION_COOKIE}={id_token}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age={SESSION_TTL_SECONDS}"
     );
     headers.insert(
         header::SET_COOKIE,
@@ -301,6 +317,8 @@ pub fn session_cookie(id_token: &str, is_https: bool, domain: Option<&str>) -> H
     headers
 }
 
+/// Get client IP from headers (trusts x-forwarded-for/x-real-ip).
+/// Used for rate limiting and logging only — never used for session binding.
 pub fn client_ip(headers: &HeaderMap) -> String {
     headers
         .get("x-forwarded-for")
@@ -318,13 +336,14 @@ pub fn client_ip(headers: &HeaderMap) -> String {
 }
 
 #[allow(dead_code)]
-pub fn clear_session_cookie(is_https: bool, domain: Option<&str>) -> HeaderMap {
+pub fn clear_session_cookie(is_https: bool, _domain: Option<&str>) -> HeaderMap {
     let mut headers = HeaderMap::new();
-    let secure_flag = if is_https { "; Secure" } else { "" };
-    let domain_attribute = domain.map_or_else(String::new, |value| format!("; Domain={value}"));
-    let value = format!(
-        "{SESSION_COOKIE}=; Path=/; HttpOnly{secure_flag}; SameSite=Lax; Max-Age=0{domain_attribute}"
-    );
+    // __Host- prefix requires Secure, Path=/, no Domain attribute
+    if !is_https {
+        eprintln!("ERROR: session cookie requires HTTPS when using __Host- prefix");
+        return HeaderMap::new();
+    }
+    let value = format!("{SESSION_COOKIE}=; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=0");
     headers.insert(
         header::SET_COOKIE,
         HeaderValue::from_str(&value).unwrap_or_else(|_| HeaderValue::from_static("")),
@@ -393,28 +412,6 @@ pub async fn extract_current_user(
                 }
             }
         };
-        let token_hash = Sha256::digest(raw_val.as_bytes());
-        let ip = client_ip(headers);
-        let binding = sqlx::query_scalar::<_, String>(
-            "SELECT client_ip FROM session_ip_bindings WHERE token_hash = $1 AND expires_at > now()",
-        )
-        .bind(token_hash.as_slice())
-        .fetch_optional(db)
-        .await
-        .ok()
-        .flatten();
-        if binding
-            .as_deref()
-            .is_some_and(|bound| bound != "unknown" && ip != "unknown" && bound != ip)
-        {
-            return None;
-        }
-        let _ = sqlx::query(
-            "UPDATE session_ip_bindings SET last_seen_at = now() WHERE token_hash = $1 AND expires_at > now()",
-        )
-        .bind(token_hash.as_slice())
-        .execute(db)
-        .await;
         // Reject banned users.
         if is_user_banned(db, &sub).await {
             return None;
@@ -495,6 +492,9 @@ async fn login(
         .get("continue")
         .and_then(|path| safe_continue_path(path))
         .unwrap_or("/dashboard");
+    let verifier = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
+    let challenge = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .encode(Sha256::digest(verifier.as_bytes()));
     let url = url::Url::parse_with_params(
         &state.authorization_endpoint,
         [
@@ -503,14 +503,16 @@ async fn login(
             ("redirect_uri", &state.redirect_uri),
             ("scope", "openid profile"),
             ("state", &state_nonce),
+            ("code_challenge", &challenge),
+            ("code_challenge_method", "S256"),
         ],
     )
     .map_err(|e| AuthError::InvalidToken(format!("authorize URL: {e}")))?;
     let mut response = Redirect::to(url.as_str()).into_response();
     let is_https = state.redirect_uri.starts_with("https://");
     let secure_flag = if is_https { "; Secure" } else { "" };
-    // Store state and continue path in cookie: state|continue_path
-    let cookie_value = format!("{state_nonce}|{continue_path}");
+    // Store state, continue path, and PKCE verifier in cookie: state|continue_path|verifier
+    let cookie_value = format!("{state_nonce}|{continue_path}|{verifier}");
     let cookie = format!(
         "{OIDC_STATE_COOKIE}={cookie_value}; Path=/; HttpOnly{secure_flag}; SameSite=Lax; Max-Age=600"
     );
@@ -522,7 +524,7 @@ async fn login(
     // identity while the callback is trying to establish a new session.
     response.headers_mut().append(
         header::SET_COOKIE,
-        clear_session_cookie(is_https, state.session_cookie_domain.as_deref())
+        clear_session_cookie(is_https, None)
             .get(header::SET_COOKIE)
             .cloned()
             .ok_or_else(|| AuthError::InvalidToken("clear session cookie".into()))?,
@@ -543,13 +545,20 @@ async fn callback(
                 .split(';')
                 .find_map(|part| part.trim().strip_prefix(&format!("{OIDC_STATE_COOKIE}=")))
         });
-    let (expected_state, continue_path) = match cookie_val {
-        Some(v) if v.contains('|') => v.split_once('|').unwrap_or((v, "/dashboard")),
-        Some(v) => (v, "/dashboard"),
-        None => ("", "/dashboard"),
+    let (expected_state, continue_path, code_verifier) = match cookie_val {
+        Some(v) => {
+            let parts: Vec<&str> = v.splitn(3, '|').collect();
+            match parts.as_slice() {
+                [s, p, cv] => (*s, *p, Some(*cv)),
+                [s, p] => (*s, *p, None),
+                [s] => (*s, "/dashboard", None),
+                _ => ("", "/dashboard", None),
+            }
+        }
+        None => ("", "/dashboard", None),
     };
     let continue_path = safe_continue_path(continue_path).unwrap_or("/dashboard");
-    if expected_state != query.state {
+    if expected_state.is_empty() || expected_state != query.state {
         return Err(AuthError::InvalidToken("OAuth state mismatch".into()));
     }
     let client = &app.auth.client;
@@ -558,15 +567,20 @@ async fn callback(
     let client_id = &app.auth.client_id;
     let client_secret = &app.auth.client_secret;
 
+    let mut form_fields = vec![
+        ("grant_type", "authorization_code"),
+        ("code", query.code.as_str()),
+        ("redirect_uri", redirect_uri.as_str()),
+        ("client_id", client_id.as_str()),
+        ("client_secret", client_secret.as_str()),
+    ];
+    if let Some(cv) = code_verifier {
+        form_fields.push(("code_verifier", cv));
+    }
+
     let response = client
         .post(token_endpoint)
-        .form(&[
-            ("grant_type", "authorization_code"),
-            ("code", query.code.as_str()),
-            ("redirect_uri", redirect_uri.as_str()),
-            ("client_id", client_id.as_str()),
-            ("client_secret", client_secret.as_str()),
-        ])
+        .form(&form_fields)
         .send()
         .await
         .map_err(|e| AuthError::Upstream(e.to_string()))?;
@@ -609,24 +623,6 @@ async fn callback(
     .map_err(|e| AuthError::Upstream(format!("user provision: {e}")))?;
 
     let session_token = app.auth.issue_session_token(&claims.sub)?;
-    let token_hash = Sha256::digest(session_token.as_bytes());
-    let user_id: i64 = sqlx::query_scalar("SELECT id FROM users WHERE auth_subject = $1")
-        .bind(&claims.sub)
-        .fetch_one(&app.db)
-        .await
-        .map_err(|e| AuthError::Upstream(format!("session user lookup: {e}")))?;
-    sqlx::query(
-        "INSERT INTO session_ip_bindings (token_hash, user_id, client_ip, expires_at) \
-         VALUES ($1, $2, $3, now() + interval '30 days') \
-         ON CONFLICT (token_hash) DO UPDATE SET user_id = EXCLUDED.user_id, client_ip = EXCLUDED.client_ip, expires_at = EXCLUDED.expires_at, last_seen_at = now()",
-    )
-    .bind(token_hash.as_slice())
-    .bind(user_id)
-    .bind(client_ip(&headers))
-    .execute(&app.db)
-    .await
-    .map_err(|e| AuthError::Upstream(format!("session binding: {e}")))?;
-
     let is_https = app.auth.redirect_uri.starts_with("https://");
     let frontend_url = std::env::var("FRONTEND_URL")
         .ok()
@@ -646,11 +642,9 @@ async fn callback(
         continue_path.to_string()
     };
     let mut response = Redirect::to(&redirect_target).into_response();
-    response.headers_mut().extend(session_cookie(
-        &session_token,
-        is_https,
-        app.auth.session_cookie_domain.as_deref(),
-    ));
+    response
+        .headers_mut()
+        .extend(session_cookie(&session_token, is_https, None));
     response
         .headers_mut()
         .append(header::SET_COOKIE, clear_oidc_state_cookie(is_https));

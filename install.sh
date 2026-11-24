@@ -1,6 +1,6 @@
 #!/bin/bash
 # HackAI installer - downloads and installs the latest release
-# Usage: curl -fsSL https://raw.githubusercontent.com/hackclub/hackai/main/install.sh | bash
+# Usage: curl -fsSL https://raw.githubusercontent.com/crabby605/hackai/main/install.sh | bash
 
 set -euo pipefail
 

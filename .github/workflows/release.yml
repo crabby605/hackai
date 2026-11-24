@@ -1,11 +1,10 @@
 name: Release
 
 on:
-  push:
-    tags:
-      - 'v*'
   workflow_dispatch:
 
+# Legacy release workflow: manual-only. CLI releases are handled by
+# release-cli.yml on tag pushes; this workflow no longer races on tags.
 permissions:
   contents: write
   packages: write
@@ -78,7 +77,7 @@ jobs:
       - name: Prepare artifacts
         run: |
           mkdir -p dist
-          cp target/${{ matrix.target }}/release/hackai${{ matrix.target }} dist/${{ matrix.artifact }} 2>/dev/null || \
+          cp target/${{ matrix.target }}/release/hackai dist/${{ matrix.artifact }} 2>/dev/null || \
           cp target/${{ matrix.target }}/release/hackai.exe dist/${{ matrix.artifact }} 2>/dev/null || true
 
           if [ "${{ runner.os }}" = "Linux" ] && [ "${{ matrix.cross }}" != "true" ]; then

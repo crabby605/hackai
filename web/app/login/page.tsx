@@ -18,7 +18,8 @@ export default async function LoginPage({
     searchParams: Promise<{ and?: string; error?: string; expired?: string; utm_source?: string; utm_medium?: string }>
 }) {
   const { and, error, expired, utm_source, utm_medium } = await searchParams
-  const continuePath = localPath(and)
+  const targetPath = localPath(and)
+  const continuePath = targetPath === "/login" ? "/dashboard" : targetPath
   const cookieStore = await cookies()
   const cookie = cookieStore.get("hackai_session")?.value
   const viewer = cookie ? await getJson<{ username: string }>("/api/v1/me") : null

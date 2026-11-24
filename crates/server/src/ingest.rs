@@ -18,10 +18,28 @@ use sqlx::Row;
 use sqlx::types::Json as SqlxJson;
 
 const VALID_EVENT_KINDS: &[&str] = &[
-    "PromptSubmitted", "ToolStarted", "ToolFinished", "HumanEdit", "GitCommit",
-    "SessionEnded", "Annotation", "QueueOperation", "AgentTurnEnd", "ToolCall",
-    "ToolResult", "PermissionRequest", "PermissionDecision", "Interrupt",
-    "TestRun", "BuildRun", "Commit", "Compaction", "Clear", "Resume", "SessionStart", "SessionEnd",
+    "PromptSubmitted",
+    "ToolStarted",
+    "ToolFinished",
+    "HumanEdit",
+    "GitCommit",
+    "SessionEnded",
+    "Annotation",
+    "QueueOperation",
+    "AgentTurnEnd",
+    "ToolCall",
+    "ToolResult",
+    "PermissionRequest",
+    "PermissionDecision",
+    "Interrupt",
+    "TestRun",
+    "BuildRun",
+    "Commit",
+    "Compaction",
+    "Clear",
+    "Resume",
+    "SessionStart",
+    "SessionEnd",
 ];
 
 const MAX_EVENTS_PER_BATCH: usize = 100;

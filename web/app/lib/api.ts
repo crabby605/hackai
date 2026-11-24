@@ -1,5 +1,5 @@
 import "server-only"
-import { cookies } from "next/headers"
+import { cookies, headers } from "next/headers"
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:3000"
 
@@ -39,6 +39,19 @@ async function fetchApi<T>(path: string): Promise<T | null> {
   const reqHeaders: Record<string, string> = {
     Cookie: `hackai_session=${session}`,
     "Content-Type": "application/json",
+  }
+  try {
+    const headerStore = await headers()
+    const forwarded = headerStore.get("x-forwarded-for")
+    if (forwarded) {
+      reqHeaders["x-forwarded-for"] = forwarded
+    }
+    const realIp = headerStore.get("x-real-ip")
+    if (realIp) {
+      reqHeaders["x-real-ip"] = realIp
+    }
+  } catch {
+    // headers() may throw in non-request contexts
   }
   const res = await fetch(`${API_BASE}${path}`, {
     headers: reqHeaders,

@@ -9,3 +9,4 @@ pub mod queue;
 pub mod queue_process;
 pub mod sync;
 pub mod track;
+pub mod update;

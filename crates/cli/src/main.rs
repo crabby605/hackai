@@ -3,7 +3,6 @@
 //! Modular structure:
 //! - commands: CLI command implementations grouped by domain
 //! - classifier: Local prompt classification (ML + rules)
-//! - encoding: Rich encoding for dialogue replay
 //! - installer: Hook/integration installation
 //! - state: local paths, config, queue, audit, checkpoint
 //! - api: HTTP client functions for server communication
@@ -16,7 +15,6 @@
 mod api;
 mod classifier;
 mod commands;
-mod encoding;
 mod evidence_export;
 mod git;
 mod harness;
@@ -264,6 +262,12 @@ enum Command {
         #[command(subcommand)]
         command: QueueCommand,
     },
+    /// Check for and install the latest hackai release (release installs only)
+    Update {
+        /// Skip confirmation prompt and install the update immediately
+        #[arg(long)]
+        yes: bool,
+    },
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -487,6 +491,20 @@ fn cmd_purge(repo: &Path) -> io::Result<()> {
 
 fn main() -> io::Result<()> {
     let cli = Cli::parse();
+    // Automatic update check for interactive user-facing invocations only.
+    // Nonfatal and gated to once per 24 hours.
+    if !matches!(
+        &cli.command,
+        Command::Update { .. }
+            | Command::Mcp
+            | Command::Harness {
+                command: HarnessCommand::Hook { .. }
+            }
+            | Command::CheckpointNudge { .. }
+    ) {
+        let _ = crate::commands::update::background_check();
+    }
+
     match cli.command {
         Command::Track {
             repo,
@@ -590,6 +608,7 @@ fn main() -> io::Result<()> {
         }
         Command::Purge { repo } | Command::Uninstall { repo } => cmd_purge(&repo)?,
         Command::Install { repo, global } => cmd_install(&repo, global)?,
+        Command::Update { yes } => crate::commands::update::cmd_update(yes)?,
     };
     Ok(())
 }

@@ -20,8 +20,9 @@ use crate::AppState;
 fn annotation_policy_sha256() -> &'static str {
     static SHA: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     SHA.get_or_init(|| {
-        std::env::var("ANNOTATION_POLICY_SHA256")
-            .unwrap_or_else(|_| "ac36dc69ffb032a0a86c0c2123bfdb20df1dcdbe8e7080980f03116e6c4c169d".to_string())
+        std::env::var("ANNOTATION_POLICY_SHA256").unwrap_or_else(|_| {
+            "ac36dc69ffb032a0a86c0c2123bfdb20df1dcdbe8e7080980f03116e6c4c169d".to_string()
+        })
     })
 }
 
