@@ -82,6 +82,7 @@ async fn main() -> Result<(), BoxError> {
         .merge(sse::routes())
         .merge(annotations::routes())
         .merge(modules::projects::routes())
+        .merge(modules::community::routes())
         .merge(modules::dashboard::routes())
         .merge(modules::episodes::routes())
         .merge(modules::struggles::routes())

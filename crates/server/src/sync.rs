@@ -407,17 +407,18 @@ async fn sync(
 
     // Idempotent on batch hash: a batch already applied for this user is skipped
     // wholesale so retries never duplicate episodes or double-count credit.
-    // Uses processed_batches table with unique constraint to avoid race conditions.
+    // Fast-path SELECT avoids the GitHub gate on retries; the batch is marked
+    // atomically inside the write transaction below (race-safe).
     if let Some(batch_id) = &req.batch_id {
-        let already = sqlx::query(
-            "INSERT INTO processed_batches (user_id, batch_id) VALUES ($1, $2) ON CONFLICT (user_id, batch_id) DO NOTHING RETURNING id"
+        let already: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM processed_batches WHERE user_id = $1 AND batch_id = $2)",
         )
         .bind(user_id)
         .bind(batch_id)
-        .fetch_optional(&state.db)
+        .fetch_one(&state.db)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-        if already.is_some() {
+        if already {
             return Ok(Json(SyncResponse {
                 status: "synced",
                 project_id,
@@ -455,11 +456,55 @@ async fn sync(
         },
     };
 
+    // A tampered client forfeits all outcome credit regardless of the GitHub gate.
+    if tampered_request {
+        gate.outcome_factor_permille = 0;
+        gate.reason = "tampered_client";
+    }
+
+    // All writes from batch marking onward run in one transaction so a
+    // mid-sync DB failure rolls back cleanly and can be retried without data
+    // loss. The GitHub gate (external HTTP) deliberately stays outside it.
+    let mut tx = state
+        .db
+        .begin()
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    if let Some(batch_id) = &req.batch_id {
+        let marked = sqlx::query(
+            "INSERT INTO processed_batches (user_id, batch_id) VALUES ($1, $2) ON CONFLICT (user_id, batch_id) DO NOTHING RETURNING id",
+        )
+        .bind(user_id)
+        .bind(batch_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        if marked.is_none() {
+            // A concurrent sync already marked this batch; roll back and report synced.
+            return Ok(Json(SyncResponse {
+                status: "synced",
+                project_id,
+                repository_id,
+                annotations_synced: 0,
+                checkpoints_synced: 0,
+                episodes_synced: 0,
+                prompt_events_synced: 0,
+                prompt_metrics_synced: 0,
+                tampered_request,
+                github_url: github_url.map(|(o, n)| format!("https://github.com/{}/{}", o, n)),
+                commits_synced: 0,
+                outcome_factor_permille: None,
+                github_gate_reason: None,
+            }));
+        }
+    }
+
     if let (Some(repo_id), Some(public)) = (repository_id, gate.repository_public) {
         sqlx::query("UPDATE repositories SET public = $1 WHERE id = $2")
             .bind(public)
             .bind(repo_id)
-            .execute(&state.db)
+            .execute(&mut *tx)
             .await
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     }
@@ -480,7 +525,7 @@ async fn sync(
             .bind(i64::from(commit.files_changed))
             .bind(i64::from(commit.lines_added))
             .bind(i64::from(commit.lines_deleted))
-            .execute(&state.db)
+            .execute(&mut *tx)
             .await
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
             commits_synced += 1;
@@ -505,7 +550,7 @@ async fn sync(
         .bind(repo_id)
         .bind(user_id)
         .bind(&head_tree)
-        .execute(&state.db)
+        .execute(&mut *tx)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
         let owned = sqlx::query_scalar::<_, bool>(
@@ -514,7 +559,7 @@ async fn sync(
         .bind(sha)
         .bind(repo_id)
         .bind(user_id)
-        .fetch_one(&state.db)
+        .fetch_one(&mut *tx)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
         if !owned {
@@ -537,13 +582,13 @@ async fn sync(
             .bind(gate.outcome_factor_permille)
             .bind(gate.reason)
             .bind(gate.github_observed)
-            .execute(&state.db)
+            .execute(&mut *tx)
             .await
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
             if gate.github_observed {
                 sqlx::query("UPDATE commits SET github_observed_at = now() WHERE sha = $1")
                     .bind(sha)
-                    .execute(&state.db)
+                    .execute(&mut *tx)
                     .await
                     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
             }
@@ -559,7 +604,7 @@ async fn sync(
         {
             continue;
         }
-        let _ = sqlx::query(
+        sqlx::query(
             "INSERT INTO annotations (user_id, session_key, label, evidence, applied, discount_permille) \
              VALUES ($1, $2, $3, $4, $5, $6)",
         )
@@ -569,8 +614,9 @@ async fn sync(
         .bind(&ann.evidence)
         .bind(false)    // applied is always server-forced; client value ignored
         .bind(0)        // discount_permille is always server-forced; client value ignored
-        .execute(&state.db)
-        .await;
+        .execute(&mut *tx)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
         annotations_synced += 1;
     }
 
@@ -580,11 +626,12 @@ async fn sync(
         if !safe_metadata(&cp.cursor, 1_024) {
             continue;
         }
-        let _ = sqlx::query("INSERT INTO checkpoints (user_id, cursor) VALUES ($1, $2)")
+        sqlx::query("INSERT INTO checkpoints (user_id, cursor) VALUES ($1, $2)")
             .bind(user_id)
             .bind(&cp.cursor)
-            .execute(&state.db)
-            .await;
+            .execute(&mut *tx)
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
         checkpoints_synced += 1;
     }
 
@@ -608,6 +655,11 @@ async fn sync(
         {
             continue;
         }
+        let started_seconds = episode.started_at.0 / 1_000;
+        let ended_seconds = episode.ended_at.0 / 1_000;
+        if !episode_claims_within_bounds(episode) {
+            continue;
+        }
         let evidence: Vec<String> = episode
             .buckets
             .iter()
@@ -615,9 +667,15 @@ async fn sync(
             .map(|id| id.0.clone())
             .filter(|id| !id.is_empty() && id.len() <= 256)
             .collect();
-        let started_seconds = episode.started_at.0 / 1_000;
-        let ended_seconds = episode.ended_at.0 / 1_000;
-        let stored = sqlx::query(
+        // Sanitize raw file paths: store only HMAC-SHA256 digests keyed by a
+        // server secret, so no raw paths are ever persisted (admin sees
+        // count/hash only because raw paths are no longer stored).
+        let sanitized_files: Vec<String> = episode
+            .files_touched
+            .iter()
+            .map(|path| hex::encode(hmac_sha256(files_hmac_secret(&state), path.as_bytes())))
+            .collect();
+        sqlx::query(
             "INSERT INTO productive_episodes \
              (user_id, project_id, session_key, started_at, ended_at, attempts, signatures, files_touched, \
               human_edit_seconds, agent_edit_seconds, resolved, credited_seconds, evidence_ids, formula_version, batch_id, outcome_factor_permille) \
@@ -636,20 +694,19 @@ async fn sync(
         .bind(ended_seconds as f64)
         .bind(i64::from(episode.attempts))
         .bind(serde_json::json!(episode.distinct_signatures))
-        .bind(serde_json::json!(episode.files_touched))
-        .bind(i64::try_from(episode.human_edit_seconds).unwrap_or(i64::MAX))
-        .bind(i64::try_from(episode.agent_edit_seconds).unwrap_or(i64::MAX))
+        .bind(serde_json::json!(sanitized_files))
+        .bind(i64::try_from(episode.human_edit_seconds).ok().unwrap_or(0))
+        .bind(i64::try_from(episode.agent_edit_seconds).ok().unwrap_or(0))
         .bind(episode.resolved)
-        .bind(i64::try_from(episode.credited_seconds).unwrap_or(i64::MAX))
+        .bind(i64::try_from(episode.credited_seconds).ok().unwrap_or(0))
         .bind(serde_json::json!(evidence))
         .bind(i32::from(episode.formula_version))
         .bind(req.batch_id.as_deref())
         .bind(gate.outcome_factor_permille)
-        .execute(&state.db)
-        .await;
-        if stored.is_ok() {
-            episodes_synced += 1;
-        }
+        .execute(&mut *tx)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        episodes_synced += 1;
     }
 
     let mut prompt_events_synced = 0;
@@ -661,11 +718,9 @@ async fn sync(
         {
             continue;
         }
-        let stored = sqlx::query("INSERT INTO prompt_events (user_id, project_id, harness, session_id, occurred_at, pasted_environment_hint, tampered_request, signals) VALUES ($1, $2, $3, $4, to_timestamp($5::double precision / 1000), $6, $7, $8) ON CONFLICT (user_id, project_id, session_id, occurred_at) DO UPDATE SET harness = EXCLUDED.harness, pasted_environment_hint = EXCLUDED.pasted_environment_hint, tampered_request = EXCLUDED.tampered_request, signals = EXCLUDED.signals")
-            .bind(user_id).bind(project_id).bind(&event.harness).bind(&event.session_id).bind(event.occurred_at_unix_ms).bind(event.pasted_environment_hint).bind(tampered_request).bind(&event.signals).execute(&state.db).await;
-        if stored.is_ok() {
-            prompt_events_synced += 1;
-        }
+        sqlx::query("INSERT INTO prompt_events (user_id, project_id, harness, session_id, occurred_at, pasted_environment_hint, tampered_request, signals) VALUES ($1, $2, $3, $4, to_timestamp($5::double precision / 1000), $6, $7, $8) ON CONFLICT (user_id, project_id, session_id, occurred_at) DO UPDATE SET harness = EXCLUDED.harness, pasted_environment_hint = EXCLUDED.pasted_environment_hint, tampered_request = EXCLUDED.tampered_request, signals = EXCLUDED.signals")
+            .bind(user_id).bind(project_id).bind(&event.harness).bind(&event.session_id).bind(event.occurred_at_unix_ms).bind(event.pasted_environment_hint).bind(tampered_request).bind(&event.signals).execute(&mut *tx).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        prompt_events_synced += 1;
     }
 
     let mut prompt_metrics_synced = 0;
@@ -679,16 +734,20 @@ async fn sync(
         {
             continue;
         }
-        let stored = sqlx::query(
+        sqlx::query(
             "INSERT INTO prompt_metrics (user_id, project_id, day_start, prompt_count, proficiency_sum_permille, slop_sum_permille) VALUES ($1, $2, to_timestamp($3), $4, $5, $6) ON CONFLICT (user_id, project_id, day_start) DO UPDATE SET prompt_count = EXCLUDED.prompt_count, proficiency_sum_permille = EXCLUDED.proficiency_sum_permille, slop_sum_permille = EXCLUDED.slop_sum_permille",
         )
         .bind(user_id).bind(project_id).bind(metric.day_start_unix)
         .bind(metric.prompt_count).bind(metric.proficiency_sum_permille).bind(metric.slop_sum_permille)
-        .execute(&state.db).await;
-        if stored.is_ok() {
-            prompt_metrics_synced += 1;
-        }
+        .execute(&mut *tx)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        prompt_metrics_synced += 1;
     }
+
+    tx.commit()
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     state
         .sse_hub
@@ -840,6 +899,76 @@ fn valid_github_component(value: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
 }
 
+/// Server secret used to key the HMAC that sanitizes file paths before storage.
+/// Configure via FILES_TOUCHED_HMAC_SECRET; a fallback keeps dev/tests working.
+fn files_hmac_secret(state: &AppState) -> &'static [u8] {
+    static SECRET: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
+    SECRET.get_or_init(|| {
+        std::env::var("FILES_TOUCHED_HMAC_SECRET")
+            .ok()
+            .filter(|secret| !secret.is_empty())
+            .map(String::into_bytes)
+            .unwrap_or_else(|| {
+                if state.auth.session_signing_key.is_empty() {
+                    uuid::Uuid::new_v4().to_string().into_bytes()
+                } else {
+                    state.auth.session_signing_key.clone().into_bytes()
+                }
+            })
+    })
+}
+
+/// HMAC-SHA256 built from the already-dependency `sha2` crate (no new dependency).
+/// Returns the raw 32-byte digest.
+fn hmac_sha256(key: &[u8], message: &[u8]) -> [u8; 32] {
+    use sha2::Digest;
+    const BLOCK: usize = 64;
+    let mut k = [0u8; BLOCK];
+    if key.len() > BLOCK {
+        k.copy_from_slice(&sha2::Sha256::digest(key));
+    } else {
+        k[..key.len()].copy_from_slice(key);
+    }
+    let mut inner_key = k;
+    let mut outer_key = k;
+    for i in 0..BLOCK {
+        inner_key[i] ^= 0x36;
+        outer_key[i] ^= 0x5c;
+    }
+    let mut hasher = sha2::Sha256::new();
+    hasher.update(inner_key);
+    hasher.update(message);
+    let inner = hasher.finalize();
+    let mut hasher = sha2::Sha256::new();
+    hasher.update(outer_key);
+    hasher.update(inner);
+    let mut out = [0u8; 32];
+    out.copy_from_slice(&hasher.finalize());
+    out
+}
+
+/// Pure bounds check for an episode's credit claims. Returns false (skip) when
+/// any claim exceeds the i64 range or the elapsed session duration. Never
+/// clamps: out-of-range claims are rejected outright.
+fn episode_claims_within_bounds(episode: &LocalEpisode) -> bool {
+    let started_seconds = episode.started_at.0 / 1_000;
+    let ended_seconds = episode.ended_at.0 / 1_000;
+    let elapsed = ended_seconds - started_seconds;
+    if elapsed < 0 {
+        return false;
+    }
+    let max_credit: u64 = u64::try_from(i64::MAX).ok().unwrap_or(0);
+    let elapsed_u64: u64 = u64::try_from(elapsed).ok().unwrap_or(0);
+    episode.human_edit_seconds <= max_credit
+        && episode.agent_edit_seconds <= max_credit
+        && episode.credited_seconds <= max_credit
+        && episode.credited_seconds <= elapsed_u64
+        && episode
+            .human_edit_seconds
+            .saturating_add(episode.agent_edit_seconds)
+            <= elapsed_u64
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -866,5 +995,72 @@ mod tests {
         assert!(valid_commit_hash(&"0123456789abcdef".repeat(4)));
         assert!(!valid_commit_hash(&"A".repeat(40)));
         assert!(!valid_commit_hash("not-a-sha"));
+    }
+
+    #[test]
+    fn episode_claims_are_rejected_when_out_of_bounds() {
+        let ep =
+            |human: u64, agent: u64, credited: u64, started_ms: i64, ended_ms: i64| LocalEpisode {
+                formula_version: 1,
+                started_at: LocalTime(started_ms),
+                ended_at: LocalTime(ended_ms),
+                session: "s".into(),
+                attempts: 1,
+                distinct_signatures: vec![],
+                files_touched: vec![],
+                human_edit_seconds: human,
+                agent_edit_seconds: agent,
+                resolved: false,
+                credited_seconds: credited,
+                buckets: vec![],
+            };
+        let one_hour = 3600;
+        // Within bounds: accepted.
+        assert!(episode_claims_within_bounds(&ep(
+            100,
+            100,
+            200,
+            0,
+            one_hour * 1000
+        )));
+        // Credited exceeds elapsed: rejected (never clamped).
+        assert!(!episode_claims_within_bounds(&ep(
+            100,
+            100,
+            4000,
+            0,
+            one_hour * 1000
+        )));
+        // Human + agent exceeds elapsed: rejected.
+        assert!(!episode_claims_within_bounds(&ep(
+            2000,
+            2000,
+            100,
+            0,
+            one_hour * 1000
+        )));
+        // i64 range overflow on human or credited: rejected.
+        assert!(!episode_claims_within_bounds(&ep(
+            u64::MAX,
+            0,
+            0,
+            0,
+            one_hour * 1000
+        )));
+        assert!(!episode_claims_within_bounds(&ep(
+            0,
+            0,
+            u64::MAX,
+            0,
+            one_hour * 1000
+        )));
+        // Negative elapsed: rejected.
+        assert!(!episode_claims_within_bounds(&ep(
+            0,
+            0,
+            0,
+            one_hour * 1000,
+            0
+        )));
     }
 }

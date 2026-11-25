@@ -121,6 +121,8 @@ pub struct OfflineQueueItem {
     pub payload: crate::api::SyncPayload,
     pub created_at: u64,
     pub attempts: u32,
+    #[serde(default)]
+    pub next_attempt_at: u64,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -238,6 +240,7 @@ pub fn enqueue_sync(
             .map_err(io::Error::other)?
             .as_secs(),
         attempts: 0,
+        next_attempt_at: 0,
     });
     write_queue(root, &queue)
 }

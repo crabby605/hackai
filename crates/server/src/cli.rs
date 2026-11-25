@@ -8,7 +8,7 @@
 //! POST /api/v1/cli/pairings/status — CLI polls with its device secret in the body.
 
 use axum::{
-    extract::State,
+    extract::{Path, State},
     http::{HeaderMap, StatusCode},
     response::Json,
     routing::{get, post},
@@ -21,7 +21,7 @@ use sqlx::Row;
 use std::time::{SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
-use crate::AppState;
+use crate::{AppState, get_user_id};
 
 const PAIRING_TTL_SECS: i64 = 1800;
 const USER_CODE_LEN: usize = 8;
@@ -33,6 +33,11 @@ pub fn routes() -> axum::Router<AppState> {
         .route("/api/v1/cli/pairings/complete", post(complete_pairing))
         .route("/api/v1/cli/pairings/status", post(pairing_status))
         .route("/api/v1/me", get(me))
+        .route("/api/v1/me/profile", post(set_profile))
+        .route(
+            "/api/v1/me/username-availability/{username}",
+            get(username_availability),
+        )
         .route("/api/v1/me/api-key", get(api_key).post(rotate_api_key))
 }
 
@@ -376,4 +381,155 @@ async fn me(State(state): State<AppState>, headers: HeaderMap) -> Result<Json<Me
         leaderboard_opt_out: row.try_get("leaderboard_opt_out").unwrap_or(false),
         is_admin: row.try_get("is_admin").unwrap_or(false),
     }))
+}
+
+/// Body for POST /api/v1/me/profile. Mirrors what the settings frontend sends.
+#[derive(Deserialize)]
+pub struct ProfileBody {
+    pub username: String,
+    pub profile_public: bool,
+    pub country_code: Option<String>,
+    pub leaderboard_opt_out: bool,
+}
+
+/// Username rule mirrored from the frontend: lowercase alphanumerics and single
+/// hyphens, 3–30 chars, no leading/trailing/consecutive hyphens.
+fn username_valid(s: &str) -> bool {
+    let bytes = s.as_bytes();
+    if !(3..=30).contains(&bytes.len()) {
+        return false;
+    }
+    let mut prev_hyphen = false;
+    for (i, &b) in bytes.iter().enumerate() {
+        if b == b'-' {
+            if i == 0 || i == bytes.len() - 1 || prev_hyphen {
+                return false;
+            }
+            prev_hyphen = true;
+        } else if !matches!(b, b'a'..=b'z' | b'0'..=b'9') {
+            return false;
+        } else {
+            prev_hyphen = false;
+        }
+    }
+    true
+}
+
+/// Country code, when present, must be exactly two uppercase ASCII letters
+/// (matching the users.country_code CHECK constraint).
+fn country_code_valid(cc: &str) -> bool {
+    cc.len() == 2 && cc.bytes().all(|byte| byte.is_ascii_uppercase())
+}
+
+/// Update the current user's public profile. Returns 409 when the requested
+/// username is already taken by another account.
+async fn set_profile(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<ProfileBody>,
+) -> Result<Json<Me>, StatusCode> {
+    let sub = crate::auth::extract_current_user(&state.auth, &state.db, &headers)
+        .await
+        .ok_or(StatusCode::UNAUTHORIZED)?;
+
+    let username = body.username.trim().to_lowercase();
+    if !username_valid(&username) {
+        return Err(StatusCode::UNPROCESSABLE_ENTITY);
+    }
+    if let Some(cc) = body.country_code.as_deref()
+        && !cc.is_empty()
+        && !country_code_valid(cc)
+    {
+        return Err(StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    let user_id = get_user_id(&state.db, &sub)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let taken: Option<(i64,)> =
+        sqlx::query_as("SELECT id FROM users WHERE username = $1 AND id != $2 LIMIT 1")
+            .bind(&username)
+            .bind(user_id)
+            .fetch_optional(&state.db)
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    if taken.is_some() {
+        return Err(StatusCode::CONFLICT);
+    }
+
+    sqlx::query(
+        "UPDATE users SET username = $1, profile_public = $2, country_code = $3, \
+                 leaderboard_opt_out = $4 WHERE id = $5",
+    )
+    .bind(&username)
+    .bind(body.profile_public)
+    .bind(body.country_code.as_deref().filter(|cc| !cc.is_empty()))
+    .bind(body.leaderboard_opt_out)
+    .bind(user_id)
+    .execute(&state.db)
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let row = sqlx::query(
+        "SELECT id, username, display_name, email, slack_id, avatar_url, country_code, \
+                 profile_public, leaderboard_opt_out, is_admin \
+             FROM users WHERE id = $1",
+    )
+    .bind(user_id)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+    .ok_or(StatusCode::NOT_FOUND)?;
+
+    Ok(Json(Me {
+        id: row
+            .try_get::<i64, _>("id")
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+            .to_string(),
+        username: row
+            .try_get("username")
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
+        display_name: row.try_get("display_name").ok(),
+        email: row.try_get("email").ok(),
+        slack_id: row.try_get("slack_id").ok(),
+        avatar_url: row.try_get("avatar_url").ok(),
+        country_code: row.try_get("country_code").ok(),
+        profile_public: row.try_get("profile_public").unwrap_or(true),
+        leaderboard_opt_out: row.try_get("leaderboard_opt_out").unwrap_or(false),
+        is_admin: row.try_get("is_admin").unwrap_or(false),
+    }))
+}
+
+/// Check whether a username is available for the current user to claim.
+/// Returns { may_be_available: boolean }.
+async fn username_availability(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(username): Path<String>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let sub = crate::auth::extract_current_user(&state.auth, &state.db, &headers)
+        .await
+        .ok_or(StatusCode::UNAUTHORIZED)?;
+
+    let username = username.trim().to_lowercase();
+    if !username_valid(&username) {
+        return Err(StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    let user_id = get_user_id(&state.db, &sub)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let taken: Option<(i64,)> =
+        sqlx::query_as("SELECT id FROM users WHERE username = $1 AND id != $2 LIMIT 1")
+            .bind(&username)
+            .bind(user_id)
+            .fetch_optional(&state.db)
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    Ok(Json(serde_json::json!({
+        "may_be_available": taken.is_none(),
+    })))
 }

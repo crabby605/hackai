@@ -92,6 +92,13 @@ mod tests {
     }
 
     #[test]
+    fn api_key_route_is_declared_once_with_both_methods() {
+        assert_eq!(OPENAPI_JSON.matches("\"/api/v1/me/api-key\"").count(), 1);
+        assert!(OPENAPI_JSON.contains("\"has_key\""));
+        assert!(OPENAPI_JSON.contains("\"api_key\""));
+    }
+
+    #[test]
     fn scalar_html_references_openapi_endpoint() {
         assert!(SCALAR_HTML.contains("/api/openapi.json"));
     }

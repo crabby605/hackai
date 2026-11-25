@@ -79,7 +79,7 @@ pub fn cmd_update(yes: bool) -> io::Result<()> {
 
     if proceed {
         perform_update(&info)?;
-        println!("hackai updated to {}.", info.tag_name);
+        report_update_success(&info.tag_name);
     } else {
         println!("Update skipped.");
     }
@@ -112,7 +112,7 @@ pub fn background_check() -> io::Result<()> {
                 .map_err(io::Error::other)?
             {
                 perform_update(&info)?;
-                println!("hackai updated to {}.", info.tag_name);
+                report_update_success(&info.tag_name);
             } else {
                 println!("Update skipped.");
             }
@@ -321,10 +321,8 @@ fn is_newer(latest: &str, current: &str) -> bool {
     parse_version(latest) > parse_version(current)
 }
 
-/// Replace the currently running executable with `new_bytes`. Works on Unix
-/// (atomic rename over the old inode) and Windows (rename the running exe
-/// aside, move the new one in, then remove the backup). All errors propagate;
-/// no unwraps or panics.
+/// Replace the executable atomically on Unix, where renaming a running inode is allowed.
+#[cfg(not(windows))]
 fn replace_executable(new_bytes: &[u8]) -> io::Result<()> {
     let exe = std::env::current_exe()?;
     let dir = exe.parent().ok_or_else(|| {
@@ -361,6 +359,40 @@ fn replace_executable(new_bytes: &[u8]) -> io::Result<()> {
     }
     let _ = fs::remove_file(&old_path);
     Ok(())
+}
+
+/// Windows locks a running executable. Stage beside it and let PowerShell swap
+/// the file after this process exits instead of pretending a live rename works.
+#[cfg(windows)]
+fn replace_executable(new_bytes: &[u8]) -> io::Result<()> {
+    let exe = std::env::current_exe()?;
+    let dir = exe.parent().ok_or_else(|| {
+        io::Error::new(io::ErrorKind::InvalidInput, "executable has no directory")
+    })?;
+    let temp = dir.join(".hackai-update-next.exe");
+    fs::write(&temp, new_bytes)?;
+    let quote = |path: &std::path::Path| path.to_string_lossy().replace('\'', "''");
+    let script = format!(
+        "Wait-Process -Id {}; Move-Item -LiteralPath '{}' -Destination '{}' -Force",
+        std::process::id(),
+        quote(&temp),
+        quote(&exe)
+    );
+    std::process::Command::new("powershell")
+        .args(["-NoProfile", "-WindowStyle", "Hidden", "-Command", &script])
+        .spawn()
+        .map_err(|error| io::Error::other(format!("could not schedule Windows update: {error}")))?;
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn report_update_success(tag: &str) {
+    println!("hackai updated to {tag}.");
+}
+
+#[cfg(windows)]
+fn report_update_success(tag: &str) {
+    println!("hackai {tag} downloaded; the update will complete after this command exits.");
 }
 
 #[cfg(test)]

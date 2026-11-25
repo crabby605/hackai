@@ -65,8 +65,10 @@ fn write_stored_token(root: &Path, token: &str) -> io::Result<()> {
 }
 
 fn clear_stored_token(root: &Path) -> io::Result<()> {
-    let _ = token_entry(root)?.delete_credential();
-    Ok(())
+    match token_entry(root)?.delete_credential() {
+        Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+        Err(error) => Err(io::Error::other(error)),
+    }
 }
 
 #[derive(Parser)]

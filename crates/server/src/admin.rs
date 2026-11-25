@@ -681,17 +681,29 @@ async fn list_users(
         .map(|v| format!("%{}%", v))
         .unwrap_or("%".to_string());
 
+    // Projects and episodes are aggregated in separate CTEs to avoid the
+    // project x episode fanout that joining both to users in one query would
+    // cause (COUNT/SUM over the Cartesian product would over-count).
     let rows = sqlx::query(
-        "SELECT u.id, u.username, u.is_admin, u.display_name, u.email, u.slack_id, u.avatar_url, \
-                u.country_code, u.profile_public, u.leaderboard_opt_out, \
-                COUNT(DISTINCT p.id)::BIGINT AS projects, \
-                COUNT(DISTINCT e.id)::BIGINT AS episodes, \
-                COALESCE(SUM(e.credited_seconds * e.outcome_factor_permille / 1000), 0)::BIGINT AS credited_seconds \
+        "WITH pc AS (
+             SELECT owner_id, COUNT(*)::BIGINT AS projects
+             FROM projects WHERE deleted_at IS NULL GROUP BY owner_id
+         ),
+         ep AS (
+             SELECT user_id,
+                    COUNT(*)::BIGINT AS episodes,
+                    COALESCE(SUM(credited_seconds * outcome_factor_permille / 1000), 0)::BIGINT AS credited_seconds
+             FROM productive_episodes GROUP BY user_id
+         )
+         SELECT u.id, u.username, u.is_admin, u.display_name, u.email, u.slack_id, u.avatar_url, \
+                 u.country_code, u.profile_public, u.leaderboard_opt_out, \
+                 COALESCE(pc.projects, 0) AS projects, \
+                 COALESCE(ep.episodes, 0) AS episodes, \
+                 COALESCE(ep.credited_seconds, 0) AS credited_seconds \
          FROM users u \
-         LEFT JOIN projects p ON p.owner_id = u.id AND p.deleted_at IS NULL \
-         LEFT JOIN productive_episodes e ON e.user_id = u.id \
+         LEFT JOIN pc ON pc.owner_id = u.id \
+         LEFT JOIN ep ON ep.user_id = u.id \
          WHERE u.username ILIKE $1 OR u.display_name ILIKE $1 \
-         GROUP BY u.id, u.username, u.is_admin, u.display_name, u.email, u.slack_id, u.avatar_url, u.country_code, u.profile_public, u.leaderboard_opt_out \
          ORDER BY u.username ASC \
          LIMIT $2",
     )
@@ -791,7 +803,7 @@ async fn get_user_review(
                 attempts, CASE WHEN resolved THEN 1 ELSE 0 END AS resolved, \
                 credited_seconds, outcome_factor_permille, human_edit_seconds, agent_edit_seconds, \
                 signatures::TEXT AS signatures_json, \
-                files_touched::TEXT AS files_touched_json, \
+                jsonb_array_length(files_touched)::BIGINT AS files_touched_count, \
                 evidence_ids::TEXT AS evidence_ids_json, \
                 formula_version, \
                 'archived' AS batch_status, \
@@ -827,7 +839,9 @@ async fn get_user_review(
                 "human_edit_seconds": r.try_get::<i64, _>("human_edit_seconds").unwrap_or(0),
                 "agent_edit_seconds": r.try_get::<i64, _>("agent_edit_seconds").unwrap_or(0),
                 "signatures_json": r.try_get::<String, _>("signatures_json").unwrap_or_else(|_| "[]".into()),
-                "files_touched_json": r.try_get::<String, _>("files_touched_json").unwrap_or_else(|_| "[]".into()),
+                "files_touched_count": r
+                    .try_get::<i64, _>("files_touched_count")
+                    .unwrap_or(0),
                 "evidence_ids_json": r.try_get::<String, _>("evidence_ids_json").unwrap_or_else(|_| "[]".into()),
                 "formula_version": r.try_get::<i32, _>("formula_version").unwrap_or(1),
                 "batch_status": r.try_get::<String, _>("batch_status").unwrap_or_else(|_| "archived".into()),

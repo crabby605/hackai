@@ -39,6 +39,7 @@ pub fn cmd_sync(repo: &Path, force: bool) -> io::Result<()> {
                 eprintln!("Sync failed: {e}");
                 state::enqueue_sync(&r, &r, payload.clone())?;
                 println!("Sync queued locally (will retry on next successful sync).");
+                return Ok(());
             }
         }
     }

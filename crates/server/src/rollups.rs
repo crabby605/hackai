@@ -102,6 +102,10 @@ async fn compute_rollups(
     // Duration per event = gap to next event, capped at 120s, min 30s.
     // Human = PromptSubmitted / HumanEdit; Agent = everything else.
     // Struggle episodes = agent events with error_signature (red->green loops).
+    //
+    // Recomputes only the NULL-project_id (global per-user) rollups. Upsert on
+    // the partial unique index (user_id, day) WHERE project_id IS NULL (migration
+    // 0031) keeps repeated compute idempotent without duplicate NULL-project_id rows.
     sqlx::query(
         "WITH ordered AS (
             SELECT
@@ -146,7 +150,7 @@ async fn compute_rollups(
             d.agent_seconds,
             COALESCE(d.struggle_episodes, 0)
         FROM daily d
-        ON CONFLICT (user_id, project_id, day) DO UPDATE SET
+        ON CONFLICT (user_id, day) WHERE project_id IS NULL DO UPDATE SET
             credited_seconds = EXCLUDED.credited_seconds,
             human_seconds = EXCLUDED.human_seconds,
             agent_seconds = EXCLUDED.agent_seconds,

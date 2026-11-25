@@ -62,6 +62,7 @@ pub async fn dashboard_stats(
         "SELECT \
              COALESCE(SUM(human_edit_seconds), 0)::BIGINT AS human_seconds, \
              COALESCE(SUM(agent_edit_seconds), 0)::BIGINT AS agent_seconds, \
+             COALESCE(SUM((human_edit_seconds + agent_edit_seconds) * outcome_factor_permille) / 1000, 0)::BIGINT AS credited_seconds, \
              COUNT(*) FILTER (WHERE attempts > 1)::BIGINT AS struggle_episodes, \
              COUNT(*)::BIGINT AS total_episodes, \
              AVG(pesdo_score_permille)::FLOAT8 AS mean_pesdo \
@@ -76,6 +77,7 @@ pub async fn dashboard_stats(
 
     let human_seconds: i64 = row.try_get("human_seconds").unwrap_or(0);
     let agent_seconds: i64 = row.try_get("agent_seconds").unwrap_or(0);
+    let credited_seconds: i64 = row.try_get("credited_seconds").unwrap_or(0);
     let struggle_episodes: i64 = row.try_get("struggle_episodes").unwrap_or(0);
 
     let total = human_seconds.saturating_add(agent_seconds);
@@ -93,7 +95,7 @@ pub async fn dashboard_stats(
     let habit_breakdown: Option<HabitBreakdown> = None;
 
     Ok(Json(DashboardStats {
-        hours_per_day: total.checked_div(3600).unwrap_or(0) as u64,
+        hours_per_day: credited_seconds.checked_div(3600).unwrap_or(0) as u64,
         human_ratio_permille: human_ratio,
         agent_ratio_permille: agent_ratio,
         struggle_episodes: struggle_episodes as u32,
