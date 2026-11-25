@@ -40,9 +40,9 @@ jobs:
           - target: aarch64-apple-darwin
             os: macos-latest
             artifact: hackai-macos-aarch64
-          # Windows built via cross on ubuntu-latest to avoid SQLite linking issues
+          # Native Windows runner - bundled SQLite works out of the box
           - target: x86_64-pc-windows-msvc
-            os: ubuntu-latest
+            os: windows-latest
             artifact: hackai-windows-x86_64.exe
     steps:
       - name: Checkout
@@ -54,12 +54,6 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
-
-      - name: Install cross-compilation dependencies (Windows)
-        if: matrix.target == 'x86_64-pc-windows-msvc'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y mingw-w64 p7zip-full
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
@@ -93,12 +87,19 @@ jobs:
 
       - name: Package binaries (Windows)
         if: matrix.target == 'x86_64-pc-windows-msvc'
-        shell: bash
+        shell: pwsh
         run: |
-          mkdir -p dist/archives/hackai-windows-x86_64
-          cp target/${{ matrix.target }}/release/hackai.exe dist/${{ matrix.artifact }}
-          cp target/${{ matrix.target }}/release/hackai.exe dist/archives/hackai-windows-x86_64/hackai.exe
-          7z a dist/archives/hackai-windows-x86_64.zip ./dist/archives/hackai-windows-x86_64/hackai.exe
+          # Install 7zip on Windows
+          if (-not (Get-Command 7z -ErrorAction SilentlyContinue)) {
+            choco install 7zip -y --no-progress
+          }
+          $artifact = "${{ matrix.artifact }}"
+          $distDir = "dist"
+          $archivesDir = "dist/archives/hackai-windows-x86_64"
+          New-Item -ItemType Directory -Force -Path $archivesDir | Out-Null
+          Copy-Item "target/${{ matrix.target }}/release/hackai.exe" "$distDir/$artifact"
+          Copy-Item "target/${{ matrix.target }}/release/hackai.exe" "$archivesDir/hackai.exe"
+          & 7z a "$distDir/archives/hackai-windows-x86_64.zip" "$archivesDir/hackai.exe"
 
       - name: Generate checksums
         shell: bash
