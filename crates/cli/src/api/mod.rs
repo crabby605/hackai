@@ -196,6 +196,7 @@ fn sha256_hex(value: &str) -> String {
     format!("{:x}", Sha256::digest(value.as_bytes()))
 }
 
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 fn command_output(program: &str, args: &[&str]) -> Option<String> {
     let output = std::process::Command::new(program)
         .args(args)
