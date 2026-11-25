@@ -17,12 +17,12 @@ mod sync;
 
 use axum::{
     BoxError, Router,
-    http::{HeaderValue, StatusCode},
+    http::{HeaderValue, Method, StatusCode, header},
     routing::get,
 };
 use sqlx::{PgPool, Row};
 use std::time::Duration;
-use tower_http::cors::{Any, CorsLayer};
+use tower_http::cors::CorsLayer;
 use tower_http::limit::RequestBodyLimitLayer;
 use tower_http::timeout::TimeoutLayer;
 
@@ -64,8 +64,8 @@ async fn main() -> Result<(), BoxError> {
             HeaderValue::from_static("https://hackclub.app"),
         ])
         .allow_credentials(true)
-        .allow_methods(Any)
-        .allow_headers(Any);
+        .allow_methods([Method::GET, Method::POST, Method::DELETE, Method::OPTIONS])
+        .allow_headers([header::CONTENT_TYPE, header::AUTHORIZATION]);
 
     let app = Router::new()
         .route("/healthz", get(|| async { "ok" }))

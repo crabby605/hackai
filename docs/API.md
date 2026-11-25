@@ -114,8 +114,8 @@ All authenticated endpoints require a session cookie (HttpOnly, SameSite=Lax), s
 
 | Method | Path | Auth | Description |
 |--------|------|------|-------------|
-| POST | `/api/v1/sync` | Bearer token | Push episodes, annotations, checkpoints, and optional SHA-256 hardware digests (legacy alias) |
-| POST | `/api/v1/upload` | Bearer token | Canonical upload endpoint for CLI sync |
+| POST | `/api/v1/sync` | Session or Bearer token | Push episodes, annotations, checkpoints, and optional SHA-256 hardware digests (legacy alias) |
+| POST | `/api/v1/upload` | Session or Bearer token | Canonical upload endpoint for CLI sync |
 | POST | `/api/v1/evidence-bundles` | Session or Bearer token | Opt-in redacted event-level evidence bundle; raw prompt text, code, paths, and tool output are rejected |
 | GET | `/api/v1/evidence-bundles` | Session or Bearer token | Caller’s redacted evidence-bundle provenance summaries |
 | GET | `/api/v1/evidence-bundles/{bundle_id}` | Session or Bearer token | Caller’s derived event records and provenance |
@@ -190,12 +190,10 @@ GitHub outages retain the claims but do not grant gated credit. Client commit
 times are claims, never server-observed push times. Set optional `GITHUB_TOKEN`
 on the server to raise API rate limits.
 
-Error: `{ "error": "message" }` with appropriate HTTP status.
+Errors use appropriate HTTP statuses; most status-only failures have an empty body, while structured API errors use `{ "error": "message" }`.
 
 ---
 
 ## Rate Limits
 
-- Auth endpoints: 10/min
-- API endpoints: 100/min per user
-- Sync: 20/min per installation
+Only per-user ingest cooldowns are currently enforced; global auth/API/sync rate limits are not implemented.

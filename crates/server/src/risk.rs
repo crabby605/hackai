@@ -79,7 +79,10 @@ async fn bounded_counts(
         .bind(SAMPLE_EVENT_IDS as i64)
         .fetch_all(&state.db)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|error| {
+            eprintln!("risk finding query failed: {error}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
     let mut total = 0u32;
     let mut samples: Vec<String> = Vec::new();
     for row in rows {
@@ -191,23 +194,23 @@ async fn findings_for_user(state: &AppState, user_id: i64) -> Result<RiskFinding
     // Always-on: metronomic prompt cadence (coefficient of variation < 0.1 over >= 30 gaps).
     let (count, samples) = bounded_counts(
         state,
-        "WITH ordered AS (\
-             SELECT user_id, session_id, occurred_at,\
-                    EXTRACT(EPOCH FROM (occurred_at - LAG(occurred_at) OVER (\
-                        PARTITION BY user_id, session_id ORDER BY occurred_at))) AS gap_secs\
-             FROM prompt_events WHERE user_id = $1\
-         ), gaps AS (\
-             SELECT user_id, session_id, gap_secs FROM ordered WHERE gap_secs IS NOT NULL\
-         ), stats AS (\
-             SELECT user_id, session_id, COUNT(*) AS n, AVG(gap_secs) AS mean,\
-                    STDDEV_POP(gap_secs) AS stddev\
-             FROM gaps GROUP BY user_id, session_id HAVING COUNT(*) >= 30\
-         )\
-         SELECT session_id AS fid, COUNT(*) OVER() AS total\
-         FROM stats\
-         WHERE mean > 0 AND stddev / mean < 0.1\
-         ORDER BY n DESC, session_id\
-         LIMIT $2",
+        r#"WITH ordered AS (
+             SELECT user_id, session_id, occurred_at,
+                    EXTRACT(EPOCH FROM (occurred_at - LAG(occurred_at) OVER (
+                        PARTITION BY user_id, session_id ORDER BY occurred_at))) AS gap_secs
+             FROM prompt_events WHERE user_id = $1
+         ), gaps AS (
+             SELECT user_id, session_id, gap_secs FROM ordered WHERE gap_secs IS NOT NULL
+         ), stats AS (
+             SELECT user_id, session_id, COUNT(*) AS n, AVG(gap_secs) AS mean,
+                    STDDEV_POP(gap_secs) AS stddev
+             FROM gaps GROUP BY user_id, session_id HAVING COUNT(*) >= 30
+         )
+         SELECT session_id AS fid, COUNT(*) OVER() AS total
+         FROM stats
+         WHERE mean > 0 AND stddev / mean < 0.1
+         ORDER BY n DESC, session_id
+         LIMIT $2"#,
         user_id,
     )
     .await?;

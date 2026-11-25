@@ -639,7 +639,6 @@ async fn sync(
     for episode in &req.episodes {
         if episode.session.is_empty()
             || episode.session.len() > 128
-            || episode.attempts == 0
             || episode.ended_at.0 < episode.started_at.0
             || episode.distinct_signatures.len() > 64
             || episode.files_touched.len() > 256
@@ -705,7 +704,10 @@ async fn sync(
         .bind(gate.outcome_factor_permille)
         .execute(&mut *tx)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|error| {
+            eprintln!("episode sync insert failed: {error}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
         episodes_synced += 1;
     }
 

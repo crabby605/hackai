@@ -298,7 +298,10 @@
           { "name": "id", "in": "path", "required": true, "schema": { "type": "integer", "format": "int64" } }
         ],
         "responses": {
-          "204": { "description": "Deleted" },
+          "200": {
+            "description": "Deleted",
+            "content": { "application/json": { "schema": { "type": "object", "properties": { "status": { "type": "string" }, "id": { "type": "integer", "format": "int64" } } } } }
+          },
           "401": { "$ref": "#/components/responses/Unauthorized" },
           "404": { "description": "Not found" }
         }
@@ -1189,12 +1192,7 @@
     },
     "responses": {
       "Unauthorized": {
-        "description": "Unauthenticated",
-        "content": {
-          "application/json": {
-            "schema": { "$ref": "#/components/schemas/Error" }
-          }
-        }
+        "description": "Unauthenticated; empty response body"
       }
     },
     "schemas": {

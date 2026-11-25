@@ -467,12 +467,13 @@ fn is_human_presence_event<P, I>(event: &NormalizedEvent<P, I>) -> Option<HumanA
         }
         EventKind::ToolFinished => {
             let tool = event.tool.as_ref()?;
+            // Only steering evidence establishes human presence from a
+            // ToolFinished.  A clean exit is not presence by itself, and
+            // error/non-zero exits are agent work, not human input.
             if tool.is_steering {
                 Some(HumanActionKind::Interrupt)
-            } else if tool.exit_code == Some(0) && tool.error_signature.is_none() {
-                None
             } else {
-                Some(HumanActionKind::Prompt)
+                None
             }
         }
         EventKind::HumanEdit | EventKind::GitCommit => {
@@ -639,48 +640,73 @@ fn build_human_timeline<P: Clone + Eq + std::hash::Hash, I: Clone + ToString>(
     timeline
 }
 
-/// Compute present seconds (P) for each bucket
+/// Compute present seconds (P) per bucket as a union of presence intervals.
+///
+/// Each human action establishes a heartbeat interval and each gap to the
+/// previous action establishes a gap interval.  Intervals are merged per
+/// project before being split across bucket boundaries, so a bucket never
+/// credits overlapping heartbeat+gap durations twice.
 fn compute_present_seconds(
     timeline: &BTreeMap<UnixMillis, Vec<HumanAction>>,
     config: &FormulaConfig,
 ) -> BTreeMap<(String, UnixMillis), u64> {
-    let mut present: BTreeMap<(String, UnixMillis), u64> = BTreeMap::new();
-    let mut last_action_per_project: HashMap<String, Option<HumanAction>> = HashMap::new();
-
+    let mut per_project: HashMap<String, Vec<HumanAction>> = HashMap::new();
     for (time, actions) in timeline {
-        let bucket = bucket_start(time.0, config.bucket_millis);
-        let _bucket_key = UnixMillis(bucket);
-
         for action in actions {
-            let project = &action.project;
-            let last = last_action_per_project.entry(project.clone()).or_default();
+            per_project
+                .entry(action.project.clone())
+                .or_default()
+                .push(HumanAction {
+                    occurred_at: *time,
+                    ..action.clone()
+                });
+        }
+    }
 
-            let gap_cap = if last.as_ref().is_some_and(|a| a.is_agent_output) {
-                config.think_time_cap_millis
-            } else {
-                config.cold_start_cap_millis
-            };
+    let mut present: BTreeMap<(String, UnixMillis), u64> = BTreeMap::new();
 
-            if let Some(last_action) = last {
-                let gap = time.0.saturating_sub(last_action.occurred_at.0);
+    for (project, mut actions) in per_project {
+        actions.sort_by_key(|action| action.occurred_at.0);
+
+        let mut intervals: Vec<(i64, i64)> = Vec::new();
+        let mut last_index: Option<usize> = None;
+
+        for (index, action) in actions.iter().enumerate() {
+            if let Some(prev_index) = last_index {
+                let prev = &actions[prev_index];
+                let gap_cap = if prev.is_agent_output {
+                    config.think_time_cap_millis
+                } else {
+                    config.cold_start_cap_millis
+                };
+                let gap = action.occurred_at.0.saturating_sub(prev.occurred_at.0);
                 let capped_gap = gap.min(gap_cap);
                 if capped_gap > 0 {
-                    let gap_bucket = bucket_start(last_action.occurred_at.0, config.bucket_millis);
-                    let gap_bucket_key = UnixMillis(gap_bucket);
-                    *present
-                        .entry((project.clone(), gap_bucket_key))
-                        .or_default() += (capped_gap / 1_000) as u64;
+                    intervals.push((prev.occurred_at.0, prev.occurred_at.0 + capped_gap));
                 }
             }
-
             if !action.is_agent_output {
-                let hb_bucket = bucket_start(action.occurred_at.0, config.bucket_millis);
-                let hb_bucket_key = UnixMillis(hb_bucket);
-                *present.entry((project.clone(), hb_bucket_key)).or_default() +=
-                    (config.heartbeat_timeout_millis / 1_000) as u64;
+                intervals.push((
+                    action.occurred_at.0,
+                    action.occurred_at.0 + config.heartbeat_timeout_millis,
+                ));
             }
+            last_index = Some(index);
+        }
 
-            *last = Some(action.clone());
+        for (start, end) in merge_intervals(intervals) {
+            let mut bucket = bucket_start(start, config.bucket_millis);
+            while bucket < end {
+                let bucket_end = bucket + config.bucket_millis;
+                let overlap_start = start.max(bucket);
+                let overlap_end = end.min(bucket_end);
+                if overlap_end > overlap_start {
+                    let key = (project.clone(), UnixMillis(bucket));
+                    *present.entry(key).or_default() +=
+                        (overlap_end - overlap_start) as u64 / 1_000;
+                }
+                bucket = bucket_end;
+            }
         }
     }
 
@@ -1009,7 +1035,8 @@ pub fn productive_episodes<
 
     for ((project, bucket_time), bucket) in buckets {
         if current_project.as_ref() != Some(&project)
-            || last_bucket_time.is_some_and(|last| bucket_time.0 > last.0 + config.bucket_millis)
+            || last_bucket_time
+                .is_some_and(|last| bucket_time.0 > last.0 + config.episode_gap_millis)
         {
             if !current_episode_buckets.is_empty()
                 && let Some(project_name) = current_project.take()
@@ -1070,13 +1097,13 @@ fn finalize_episode_from_buckets<P: Clone + Eq + std::hash::Hash + std::fmt::Deb
     all_files_touched.sort();
     all_files_touched.dedup();
 
-    let attempts = all_error_signatures.len().max(1) as u32;
+    let attempts = all_error_signatures.len() as u32;
     let distinct_signatures = all_error_signatures;
     let files_touched = all_files_touched;
     let human_edit_seconds = total_human_edit_seconds;
     let agent_edit_seconds = total_agent_edit_seconds;
 
-    let resolved = distinct_signatures.is_empty() || agent_edit_seconds > 0;
+    let resolved = distinct_signatures.is_empty();
 
     let time_to_resolution_seconds = if resolved && !distinct_signatures.is_empty() {
         Some(((ended_at.0 - started_at.0) / 1000) as u64)
@@ -1544,5 +1571,210 @@ mod tests {
         // A legacy commit with no resolvable role is unknown and credited to no one.
         assert_eq!(commit_event(ActorRole::Unknown).role, ActorRole::Unknown);
         assert!(is_human_presence_event(&commit_event(ActorRole::Unknown)).is_none());
+    }
+
+    fn err_sig(hex: &str) -> ErrorSignatureHash {
+        ErrorSignatureHash::parse(hex.to_string()).expect("valid hash")
+    }
+
+    fn tool_finished_event(
+        id: &str,
+        at: i64,
+        role: ActorRole,
+        exit_code: Option<i32>,
+        error_signature: Option<ErrorSignatureHash>,
+        is_steering: bool,
+        finished_at: Option<i64>,
+    ) -> NormalizedEvent<String, String> {
+        NormalizedEvent {
+            schema_version: 1,
+            id: EventId(id.into()),
+            occurred_at: UnixMillis(at),
+            kind: EventKind::ToolFinished,
+            role,
+            source: EventSource::Codex,
+            project: "project".into(),
+            session: "session".into(),
+            rel_path: None,
+            prompt: None,
+            tool: Some(hackai_schema::ToolFeatures {
+                class: hackai_schema::ToolClass::Run,
+                started_at: UnixMillis(at.saturating_sub(1000)),
+                finished_at: finished_at.map(UnixMillis),
+                exit_code,
+                error_signature,
+                is_steering,
+                output_low_entropy: false,
+            }),
+            change: None,
+            commit: None,
+        }
+    }
+
+    #[test]
+    fn tool_finished_without_steering_never_creates_human_presence() {
+        // Steering evidence is the only ToolFinished signal that counts as presence.
+        assert!(
+            is_human_presence_event(&tool_finished_event(
+                "t1",
+                0,
+                ActorRole::Agent,
+                None,
+                None,
+                true,
+                Some(0)
+            ))
+            .is_some()
+        );
+        // Clean exit, no steering: no presence.
+        assert!(
+            is_human_presence_event(&tool_finished_event(
+                "t2",
+                0,
+                ActorRole::Agent,
+                Some(0),
+                None,
+                false,
+                Some(0)
+            ))
+            .is_none()
+        );
+        // Non-zero exit, no steering: no presence (agent work, not human input).
+        assert!(
+            is_human_presence_event(&tool_finished_event(
+                "t3",
+                0,
+                ActorRole::Agent,
+                Some(1),
+                None,
+                false,
+                Some(0)
+            ))
+            .is_none()
+        );
+        // Error signature, no steering: no presence.
+        assert!(
+            is_human_presence_event(&tool_finished_event(
+                "t4",
+                0,
+                ActorRole::Agent,
+                Some(1),
+                Some(err_sig(&"1".repeat(64))),
+                false,
+                Some(0)
+            ))
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn episodes_cut_on_episode_gap_not_bucket_millis() {
+        // Two prompts 400s apart: wider than one bucket (300s) but narrower than
+        // the episode gap (30min), so they must stay in a single episode.
+        let config = FormulaConfig::default();
+        let mut p1 = event("p1", 0, EventKind::PromptSubmitted, ActorRole::Human);
+        let mut p2 = event("p2", 400_000, EventKind::PromptSubmitted, ActorRole::Human);
+        p1.prompt = Some(hackai_schema::PromptFeatures {
+            char_len: 20,
+            has_attachment: false,
+            has_code_fence: false,
+            is_approval: false,
+            is_hypothesis: true,
+            is_low_effort: false,
+        });
+        p2.prompt = Some(hackai_schema::PromptFeatures {
+            char_len: 20,
+            has_attachment: false,
+            has_code_fence: false,
+            is_approval: false,
+            is_hypothesis: true,
+            is_low_effort: false,
+        });
+        let events = vec![p1, p2];
+        let episodes = productive_episodes::<String, String>(&events, &config);
+        assert_eq!(
+            episodes.len(),
+            1,
+            "expected a single episode spanning the gap"
+        );
+        assert_eq!(episodes[0].buckets.len(), 2);
+        assert!(episodes[0].credited_seconds > 0);
+    }
+
+    #[test]
+    fn resolved_requires_no_distinct_signatures_agent_edits_insufficient() {
+        let config = FormulaConfig::default();
+        let sig = err_sig(&"2".repeat(64));
+
+        // Error signature present + agent edits: NOT resolved (edits alone don't resolve).
+        let mut with_errors = vec![
+            tool_finished_event(
+                "t1",
+                0,
+                ActorRole::Agent,
+                Some(1),
+                Some(sig.clone()),
+                false,
+                Some(500),
+            ),
+            event("e1", 1000, EventKind::HumanEdit, ActorRole::Human),
+        ];
+        with_errors[1].change = Some(hackai_schema::ChangeFeatures {
+            human_added: 0,
+            human_deleted: 0,
+            agent_added: 5,
+            agent_deleted: 0,
+            hunk_hashes: vec![],
+        });
+        let ep = productive_episodes::<String, String>(&with_errors, &config);
+        assert_eq!(ep.len(), 1);
+        assert!(
+            !ep[0].resolved,
+            "agent edits must not resolve an errored episode"
+        );
+        assert_eq!(ep[0].attempts, 1);
+
+        // No error signature + agent edits: resolved.
+        let clean = vec![event("e2", 1000, EventKind::HumanEdit, ActorRole::Human)];
+        let ep = productive_episodes::<String, String>(&clean, &config);
+        assert_eq!(ep.len(), 1);
+        assert!(ep[0].resolved);
+        assert_eq!(ep[0].attempts, 0);
+    }
+
+    #[test]
+    fn present_seconds_never_double_counts_heartbeat_and_gap() {
+        // Two human prompts 60s apart in the same bucket.  The gap (60s) lies
+        // inside the first heartbeat (120s), so the union is 180s, not 300s.
+        let config = FormulaConfig::default();
+        let mut timeline = BTreeMap::new();
+        timeline.insert(
+            UnixMillis(0),
+            vec![HumanAction {
+                occurred_at: UnixMillis(0),
+                project: "p".into(),
+                session: "s".into(),
+                is_agent_output: false,
+                event_id: EventId("a".into()),
+                kind: HumanActionKind::Prompt,
+            }],
+        );
+        timeline.insert(
+            UnixMillis(60_000),
+            vec![HumanAction {
+                occurred_at: UnixMillis(60_000),
+                project: "p".into(),
+                session: "s".into(),
+                is_agent_output: false,
+                event_id: EventId("b".into()),
+                kind: HumanActionKind::Prompt,
+            }],
+        );
+        let present = compute_present_seconds(&timeline, &config);
+        assert_eq!(
+            present.get(&("p".into(), UnixMillis(0))),
+            Some(&180),
+            "heartbeat+gap must not double-count the overlapping 60s"
+        );
     }
 }

@@ -369,7 +369,7 @@ fn replace_executable(new_bytes: &[u8]) -> io::Result<()> {
     let dir = exe.parent().ok_or_else(|| {
         io::Error::new(io::ErrorKind::InvalidInput, "executable has no directory")
     })?;
-    let temp = dir.join(".hackai-update-next.exe");
+    let temp = dir.join(format!(".hackai-update-next-{}.exe", uuid::Uuid::new_v4()));
     fs::write(&temp, new_bytes)?;
     let quote = |path: &std::path::Path| path.to_string_lossy().replace('\'', "''");
     let script = format!(

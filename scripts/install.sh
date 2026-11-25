@@ -7,6 +7,8 @@ set -euo pipefail
 REPO="crabby605/hackai"
 BINARY_NAME="hackai"
 INSTALL_DIR="${INSTALL_DIR:-$HOME/.local/bin}"
+TMP_DIR=$(mktemp -d)
+trap 'rm -rf "$TMP_DIR"' EXIT
 
 # Colors
 RED='\033[0;31m'
@@ -27,15 +29,15 @@ detect_platform() {
     case "$os" in
         darwin)
             case "$arch" in
-                arm64) echo "aarch64-apple-darwin" ;;
-                x86_64) echo "x86_64-apple-darwin" ;;
+                arm64) echo "macos-aarch64" ;;
+                x86_64) echo "macos-x86_64" ;;
                 *) err "Unsupported macOS arch: $arch"; exit 1 ;;
             esac
             ;;
         linux)
             case "$arch" in
-                x86_64) echo "x86_64-unknown-linux-gnu" ;;
-                aarch64|arm64) echo "aarch64-unknown-linux-gnu" ;;
+                x86_64) echo "linux-x86_64" ;;
+                aarch64|arm64) echo "linux-aarch64" ;;
                 *) err "Unsupported Linux arch: $arch"; exit 1 ;;
             esac
             ;;
@@ -57,30 +59,35 @@ download_binary() {
     local sha256_url="https://github.com/$REPO/releases/download/$tag/hackai-$target.tar.gz.sha256"
 
     info "Downloading $url"
-    curl -fsSL "$url" -o "/tmp/hackai.tar.gz"
+    curl -fsSL "$url" -o "${TMP_DIR}/hackai.tar.gz"
+    curl -fsSL "$sha256_url" -o "${TMP_DIR}/hackai.tar.gz.sha256"
 
-    if curl -fsSL "$sha256_url" -o "/tmp/hackai.tar.gz.sha256" 2>/dev/null; then
-        info "Verifying checksum..."
-        local expected=$(cut -d' ' -f1 < /tmp/hackai.tar.gz.sha256)
-        local actual=$(sha256sum /tmp/hackai.tar.gz | cut -d' ' -f1)
-        if [[ "$expected" != "$actual" ]]; then
-            err "Checksum mismatch! Expected: $expected, Got: $actual"
-            exit 1
-        fi
-        info "Checksum verified"
+    info "Verifying checksum..."
+    local expected actual
+    expected=$(cut -d' ' -f1 < "${TMP_DIR}/hackai.tar.gz.sha256")
+    if command -v sha256sum >/dev/null 2>&1; then
+        actual=$(sha256sum "${TMP_DIR}/hackai.tar.gz" | cut -d' ' -f1)
+    elif command -v shasum >/dev/null 2>&1; then
+        actual=$(shasum -a 256 "${TMP_DIR}/hackai.tar.gz" | cut -d' ' -f1)
     else
-        warn "No checksum file found, skipping verification"
+        err "No SHA-256 tool found; refusing to install"
+        exit 1
     fi
+    if [[ "$expected" != "$actual" ]]; then
+        err "Checksum mismatch! Expected: $expected, Got: $actual"
+        exit 1
+    fi
+    info "Checksum verified"
 
-    tar -xzf /tmp/hackai.tar.gz -C /tmp
-    mv /tmp/hackai /tmp/$BINARY_NAME
-    chmod +x /tmp/$BINARY_NAME
+    tar -xzf "${TMP_DIR}/hackai.tar.gz" -C "${TMP_DIR}"
+    chmod +x "${TMP_DIR}/hackai"
 }
 
 install_binary() {
     local binary_path="$1"
     mkdir -p "$INSTALL_DIR"
     mv "$binary_path" "$INSTALL_DIR/$BINARY_NAME"
+    touch "${INSTALL_DIR}/${BINARY_NAME}.release"
     info "Installed to $INSTALL_DIR/$BINARY_NAME"
 
     # Check if in PATH
@@ -103,7 +110,7 @@ main() {
     info "Latest release: $tag"
 
     download_binary "$target" "$tag"
-    install_binary "/tmp/$BINARY_NAME"
+    install_binary "${TMP_DIR}/hackai"
 
     info "Done! Run 'hackai --help' to get started"
     info "Configure with: hackai login"

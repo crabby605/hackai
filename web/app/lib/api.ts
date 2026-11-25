@@ -47,12 +47,9 @@ async function getCookieSession(): Promise<SessionCookie | undefined> {
 
 async function fetchApi<T>(path: string): Promise<T | null> {
   const session = await getCookieSession()
-  if (!session) return null
 
-  const reqHeaders: Record<string, string> = {
-    Cookie: `${session.name}=${session.value}`,
-    "Content-Type": "application/json",
-  }
+  const reqHeaders: Record<string, string> = { "Content-Type": "application/json" }
+  if (session) reqHeaders.Cookie = `${session.name}=${session.value}`
   try {
     const headerStore = await headers()
     const forwarded = headerStore.get("x-forwarded-for")
