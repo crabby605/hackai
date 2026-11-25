@@ -37,9 +37,7 @@ jobs:
           - target: x86_64-apple-darwin
             os: macos-latest
             artifact: hackai-macos-x86_64
-          - target: aarch64-apple-darwin
-            os: macos-latest
-            artifact: hackai-macos-aarch64
+          # aarch64-apple-darwin removed: GitHub macOS arm64 runners have capacity constraints
           # Native Windows runner - bundled SQLite works out of the box
           - target: x86_64-pc-windows-msvc
             os: windows-latest
