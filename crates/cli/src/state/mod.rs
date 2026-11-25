@@ -113,6 +113,63 @@ pub fn write_checkpoint_state(root: &Path, state: &CheckpointState) -> io::Resul
     )
 }
 
+/// Store a short agent-authored coaching note requested by the user. Unlike
+/// transcripts, this is an explicit opt-in export artifact and is bounded at
+/// write time so it cannot become a covert prompt log.
+pub fn write_user_feedback(root: &Path, feedback: &str) -> io::Result<()> {
+    let feedback = feedback.trim();
+    if feedback.is_empty() || feedback.split_whitespace().count() > 50 || feedback.len() > 600 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "feedback must contain 1 through 50 words",
+        ));
+    }
+    if feedback.chars().any(char::is_control) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "feedback must not contain control characters",
+        ));
+    }
+    let directory = state_dir(root);
+    fs::create_dir_all(&directory)?;
+    let record = serde_json::json!({
+        "recorded_at_unix_ms": now_millis()?,
+        "feedback": feedback,
+    });
+    let mut file = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(directory.join("user-feedback.jsonl"))?;
+    writeln!(
+        file,
+        "{}",
+        serde_json::to_string(&record).map_err(io::Error::other)?
+    )?;
+    Ok(())
+}
+
+pub fn read_user_feedback(root: &Path) -> Vec<serde_json::Value> {
+    let path = state_dir(root).join("user-feedback.jsonl");
+    fs::read_to_string(path)
+        .ok()
+        .into_iter()
+        .flat_map(|content| {
+            content
+                .lines()
+                .filter_map(|line| serde_json::from_str(line).ok())
+                .take(100)
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
+fn now_millis() -> io::Result<i64> {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(io::Error::other)
+        .and_then(|duration| i64::try_from(duration.as_millis()).map_err(io::Error::other))
+}
+
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct OfflineQueueItem {
     pub id: String,

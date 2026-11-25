@@ -185,6 +185,12 @@ enum Command {
         /// Force sync even if queue is empty
         #[arg(long)]
         force: bool,
+        /// Run the local collection and upload worker every five minutes.
+        #[arg(long, hide = true)]
+        background: bool,
+        /// Install the five-minute background worker for this project.
+        #[arg(long)]
+        install_background: bool,
     },
     /// Call an authenticated server endpoint when a harness has no native tool.
     Api {
@@ -364,8 +370,13 @@ fn cmd_whoami() -> io::Result<()> {
     crate::commands::auth::cmd_whoami()
 }
 
-fn cmd_sync(repo: &Path, force: bool) -> io::Result<()> {
-    crate::commands::sync::cmd_sync(repo, force)
+fn cmd_sync(
+    repo: &Path,
+    force: bool,
+    background: bool,
+    install_background: bool,
+) -> io::Result<()> {
+    crate::commands::sync::cmd_sync(repo, force, background, install_background)
 }
 
 fn cmd_api(repo: &Path, method: String, path: String, body: Option<String>) -> io::Result<()> {
@@ -561,7 +572,12 @@ fn main() -> io::Result<()> {
         } => cmd_login(token, api_key, device)?,
         Command::Logout => cmd_logout()?,
         Command::Whoami => cmd_whoami()?,
-        Command::Sync { repo, force } => cmd_sync(&repo, force)?,
+        Command::Sync {
+            repo,
+            force,
+            background,
+            install_background,
+        } => cmd_sync(&repo, force, background, install_background)?,
         Command::Api {
             repo,
             method,

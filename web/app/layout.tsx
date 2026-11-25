@@ -39,7 +39,8 @@ const nav: Array<[string, string, LucideIcon]> = [
 export default async function RootLayout({ children }: { children: React.ReactNode }) {
   const viewer = await getJson<Viewer>("/api/v1/me")
   const cookieStore = await cookies()
-  const cookie = cookieStore.get("__Host-hackai_session")?.value
+  // Production HTTPS uses the __Host cookie; local HTTP uses this fallback.
+  const cookie = cookieStore.get("__Host-hackai_session")?.value ?? cookieStore.get("hackai_session")?.value
   const name = viewer?.display_name ?? viewer?.username
 
   // Public marketing and auth pages should not inherit the workspace chrome.

@@ -17,6 +17,14 @@ ships it; do not rely on commit history as release notes.
 
 ### Changed
 
+- Dashboard-tracked macOS projects install a persistent local background worker
+  which collects, processes, and uploads every five minutes. Failed uploads
+  stay in the existing local queue for retry.
+- The checkpoint nudge advances on each detected harness user prompt and
+  defaults to every ten turns. It asks the agent for a constructive coaching
+  note capped at 50 words; an explicit MCP call stores that note for upload.
+- Opted-in coaching notes are synced to `user_feedback`. They are not raw
+  transcripts, prompt excerpts, code, paths, or a scoring input.
 - The CLI pairing handoff adds `cli_pairings.pending_token`. It is cleared when
   the CLI claims it; the durable API-key hash remains the only long-lived
   credential stored by the server.

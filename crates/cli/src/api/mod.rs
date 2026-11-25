@@ -1,6 +1,8 @@
 // API client functions
 use crate::git::{git_head_sha, git_remote_url};
-use crate::state::{read_local_annotations, read_local_checkpoints, read_local_episodes};
+use crate::state::{
+    read_local_annotations, read_local_checkpoints, read_local_episodes, read_user_feedback,
+};
 use reqwest::blocking::Client;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -47,6 +49,9 @@ pub struct SyncPayload {
     pub prompt_metrics: Vec<Value>,
     /// Stripped harness events; never includes prompt text.
     pub prompt_events: Vec<Value>,
+    /// Explicit opt-in agent coaching notes, capped at 50 words each.
+    #[serde(default)]
+    pub user_feedback: Vec<Value>,
     /// SHA-256 digests only. Raw hardware identifiers never leave the device.
     #[serde(default)]
     pub hardware_hashes: BTreeMap<String, String>,
@@ -149,6 +154,7 @@ pub fn build_sync_payload(repo_root: &Path) -> io::Result<SyncPayload> {
     let episodes = read_local_episodes(repo_root);
     let prompt_metrics = read_prompt_metrics(repo_root);
     let prompt_events = read_prompt_events(repo_root);
+    let user_feedback = read_user_feedback(repo_root);
     let week_ago_millis = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_err(io::Error::other)?
@@ -187,6 +193,7 @@ pub fn build_sync_payload(repo_root: &Path) -> io::Result<SyncPayload> {
         episodes,
         prompt_metrics,
         prompt_events,
+        user_feedback,
         hardware_hashes: hardware_hashes(),
         environment_class: environment_class(),
     })

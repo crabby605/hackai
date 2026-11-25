@@ -22,7 +22,7 @@ pub fn run_checkpoint_nudge(repo: &Path) -> io::Result<()> {
     state::audit(&r, "checkpoint_nudge")?;
     if due {
         println!(
-            "Checkpoint due after the current task. If evidence exists, use the HackAI annotation skill and MCP annotate tool. Default to delegated unless cited user edits or corrections support another label. Never include prompt text or award time."
+            "Checkpoint due: in 50 words or fewer, give constructive feedback on the user's collaboration in this task. Then call the HackAI MCP `record_user_feedback` tool with only that feedback. Do not include prompt excerpts, secrets, code, paths, or award time."
         );
     }
     Ok(())

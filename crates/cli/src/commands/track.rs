@@ -81,12 +81,16 @@ pub fn cmd_track(repo: &Path, local_only: bool, dashboard: bool) -> io::Result<(
                     episodes: vec![],
                     prompt_metrics: vec![],
                     prompt_events: vec![],
+                    user_feedback: vec![],
                     hardware_hashes: std::collections::BTreeMap::new(),
                     environment_class: "unknown".to_owned(),
                 });
                 let _ = api::sync_to_server(&server_url, &token, payload);
             });
             println!("Project queued for dashboard sync.");
+            if let Err(error) = crate::commands::sync::install_background_worker(&r) {
+                eprintln!("Could not install background sync: {error}");
+            }
         } else {
             println!("Not authenticated. Run `hackai login` to enable dashboard sync.");
         }

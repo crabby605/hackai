@@ -23,7 +23,7 @@ export default async function LoginPage({
   // workspace. Preserve a specific protected destination when one exists.
   const continuePath = targetPath === "/" || targetPath === "/login" ? "/dashboard" : targetPath
   const cookieStore = await cookies()
-  const cookie = cookieStore.get("__Host-hackai_session")?.value
+  const cookie = cookieStore.get("__Host-hackai_session")?.value ?? cookieStore.get("hackai_session")?.value
   const viewer = cookie ? await getJson<{ username: string }>("/api/v1/me") : null
   const sessionExpired = expired === "1" || Boolean(cookie && !viewer)
 

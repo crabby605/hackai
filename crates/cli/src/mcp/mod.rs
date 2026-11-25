@@ -1,5 +1,5 @@
 // MCP stdio server
-use crate::state::write_annotation;
+use crate::state::{write_annotation, write_user_feedback};
 use serde_json::{Value, json};
 use std::io::{self, BufRead, Write};
 use std::path::Path;
@@ -90,6 +90,18 @@ pub fn run_mcp() -> io::Result<()> {
                             }
                         },
                         {
+                            "name": "record_user_feedback",
+                            "description": "Record an opt-in, constructive coaching note of at most 50 words. It is uploaded by the local background sync; do not include prompt text, code, paths, secrets, or quotes.",
+                            "inputSchema": {
+                                "type": "object",
+                                "additionalProperties": false,
+                                "required": ["feedback"],
+                                "properties": {
+                                    "feedback": { "type": "string", "minLength": 1, "maxLength": 600 }
+                                }
+                            }
+                        },
+                        {
                             "name": "get_formula_config",
                             "description": "Get the current scoring formula configuration (version, weights, caps).",
                             "inputSchema": {
@@ -147,6 +159,42 @@ pub fn run_mcp() -> io::Result<()> {
                 };
 
                 match tool_name {
+                    Some("record_user_feedback") => {
+                        let feedback = match args.get("feedback").and_then(Value::as_str) {
+                            Some(value) => value,
+                            None => {
+                                let res = json!({
+                                    "content": [{ "type": "text", "text": "missing required parameter 'feedback'" }],
+                                    "isError": true
+                                });
+                                writeln!(stdout, "{}", mcp_response(id, res))?;
+                                stdout.flush()?;
+                                continue;
+                            }
+                        };
+                        let repo = match crate::state::root(Path::new(".")) {
+                            Ok(root) => root,
+                            Err(error) => {
+                                let res = json!({
+                                    "content": [{ "type": "text", "text": format!("Feedback rejected: {error}") }],
+                                    "isError": true
+                                });
+                                writeln!(stdout, "{}", mcp_response(id, res))?;
+                                stdout.flush()?;
+                                continue;
+                            }
+                        };
+                        match write_user_feedback(&repo, feedback) {
+                            Ok(()) => mcp_response(
+                                id,
+                                json!({"content": [{"type": "text", "text": "Feedback recorded locally and will be uploaded by the next background sync."}]}),
+                            ),
+                            Err(error) => mcp_response(
+                                id,
+                                json!({"content": [{"type": "text", "text": format!("Feedback rejected: {error}")}], "isError": true}),
+                            ),
+                        }
+                    }
                     Some("annotate") => {
                         let window = match args.get("window").and_then(Value::as_str) {
                             Some(w) => w,

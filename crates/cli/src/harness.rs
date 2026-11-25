@@ -146,6 +146,13 @@ pub fn handle_hook(repo: &Path, harness: &str, event: &str) -> io::Result<()> {
         .transpose()?
         .unwrap_or(false);
 
+    // Each real harness prompt advances the local checkpoint counter. The
+    // nudge never awards time or uploads data; it merely asks the agent to
+    // record a grounded annotation when the configured turn interval is due.
+    if prompt.is_some() {
+        let _ = crate::installer::run_checkpoint_nudge(repo);
+    }
+
     if prompt.is_none() {
         append_harness_event(repo, harness, event, session_id, &payload)?;
     }

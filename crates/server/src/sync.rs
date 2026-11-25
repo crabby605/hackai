@@ -71,6 +71,9 @@ pub struct SyncRequest {
     /// Daily aggregate prompt metrics; raw prompts are never accepted.
     #[serde(default)]
     pub prompt_metrics: Vec<LocalPromptMetric>,
+    /// User-opted-in, bounded coaching notes written by the agent locally.
+    #[serde(default)]
+    pub user_feedback: Vec<LocalUserFeedback>,
     /// SHA-256 digests only; raw hardware identifiers are never accepted.
     #[serde(default)]
     pub hardware_hashes: std::collections::BTreeMap<String, String>,
@@ -142,6 +145,12 @@ pub struct LocalPromptMetric {
     pub slop_sum_permille: i64,
 }
 
+#[derive(Deserialize, Clone)]
+pub struct LocalUserFeedback {
+    pub recorded_at_unix_ms: i64,
+    pub feedback: String,
+}
+
 fn unknown_harness() -> String {
     "unknown".to_owned()
 }
@@ -200,6 +209,7 @@ pub struct SyncResponse {
     pub episodes_synced: i64,
     pub prompt_events_synced: i64,
     pub prompt_metrics_synced: i64,
+    pub user_feedback_synced: i64,
     pub tampered_request: bool,
     pub github_url: Option<String>,
     pub commits_synced: usize,
@@ -428,6 +438,7 @@ async fn sync(
                 episodes_synced: 0,
                 prompt_events_synced: 0,
                 prompt_metrics_synced: 0,
+                user_feedback_synced: 0,
                 tampered_request,
                 github_url: github_url.map(|(o, n)| format!("https://github.com/{}/{}", o, n)),
                 commits_synced: 0,
@@ -491,6 +502,7 @@ async fn sync(
                 episodes_synced: 0,
                 prompt_events_synced: 0,
                 prompt_metrics_synced: 0,
+                user_feedback_synced: 0,
                 tampered_request,
                 github_url: github_url.map(|(o, n)| format!("https://github.com/{}/{}", o, n)),
                 commits_synced: 0,
@@ -747,6 +759,31 @@ async fn sync(
         prompt_metrics_synced += 1;
     }
 
+    let mut user_feedback_synced = 0;
+    for feedback in &req.user_feedback {
+        let word_count = feedback.feedback.split_whitespace().count();
+        if feedback.recorded_at_unix_ms < 0
+            || !(1..=50).contains(&word_count)
+            || feedback.feedback.len() > 600
+            || feedback.feedback.chars().any(char::is_control)
+        {
+            continue;
+        }
+        sqlx::query(
+            "INSERT INTO user_feedback (user_id, project_id, recorded_at, feedback) \
+             VALUES ($1, $2, to_timestamp($3::double precision / 1000), $4) \
+             ON CONFLICT (user_id, project_id, recorded_at) DO NOTHING",
+        )
+        .bind(user_id)
+        .bind(project_id)
+        .bind(feedback.recorded_at_unix_ms)
+        .bind(&feedback.feedback)
+        .execute(&mut *tx)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        user_feedback_synced += 1;
+    }
+
     tx.commit()
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -774,6 +811,7 @@ async fn sync(
         episodes_synced,
         prompt_events_synced,
         prompt_metrics_synced,
+        user_feedback_synced,
         tampered_request,
         github_url: github_url.map(|(o, n)| format!("https://github.com/{}/{}", o, n)),
         commits_synced,
