@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'Version tag (e.g., v0.1.0)'
+        description: 'Existing version tag to release (e.g., v0.1.0)'
         required: true
         type: string
 
@@ -21,6 +21,7 @@ jobs:
   build:
     name: Build ${{ matrix.target }}
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -28,10 +29,11 @@ jobs:
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
             artifact: hackai-linux-x86_64
+          # Native arm64 runner: no cross/Docker needed.
+          # If your repo is private and can't use it, switch back to ubuntu-latest + cross.
           - target: aarch64-unknown-linux-gnu
-            os: ubuntu-latest
+            os: ubuntu-24.04-arm
             artifact: hackai-linux-aarch64
-            cross: true
           - target: x86_64-apple-darwin
             os: macos-latest
             artifact: hackai-macos-x86_64
@@ -44,47 +46,64 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.version || github.ref }}
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
 
-      - name: Install cross (for cross-compilation)
-        if: matrix.cross == 'true'
-        uses: taiki-e/install-action@cross
-
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.target }}
 
+      - name: Verify tag matches Cargo version
+        shell: bash
+        env:
+          TAG: ${{ inputs.version || github.ref_name }}
+        run: |
+          CRATE=$(cargo metadata --no-deps --format-version 1 \
+            | jq -r '.packages[] | select(any(.targets[]; .name == "hackai")) | .version' \
+            | head -n1)
+          if [ "v$CRATE" != "$TAG" ]; then
+            echo "Tag $TAG does not match Cargo version v$CRATE"
+            exit 1
+          fi
+
       - name: Build
-        if: matrix.cross != 'true'
         run: cargo build --release --no-default-features --bin hackai --target ${{ matrix.target }}
 
-      - name: Cross build
-        if: matrix.cross == 'true'
-        run: cross build --release --no-default-features --bin hackai --target ${{ matrix.target }}
-
       - name: Package binaries (Unix)
-        if: matrix.os != 'windows-latest'
+        if: runner.os != 'Windows'
+        shell: bash
         run: |
           mkdir -p dist/archives/${{ matrix.artifact }}
           cp target/${{ matrix.target }}/release/hackai dist/${{ matrix.artifact }}
           cp target/${{ matrix.target }}/release/hackai dist/archives/${{ matrix.artifact }}/hackai
           tar -czf dist/archives/${{ matrix.artifact }}.tar.gz -C dist/archives/${{ matrix.artifact }} hackai
-          sha256sum dist/${{ matrix.artifact }} | awk '{print $1}' > dist/${{ matrix.artifact }}.sha256
-          sha256sum dist/archives/${{ matrix.artifact }}.tar.gz | awk '{print $1}' > dist/archives/${{ matrix.artifact }}.tar.gz.sha256
 
       - name: Package binaries (Windows)
-        if: matrix.os == 'windows-latest'
+        if: runner.os == 'Windows'
+        shell: bash
         run: |
           mkdir -p dist/archives/hackai-windows-x86_64
           cp target/${{ matrix.target }}/release/hackai.exe dist/${{ matrix.artifact }}
           cp target/${{ matrix.target }}/release/hackai.exe dist/archives/hackai-windows-x86_64/hackai.exe
-          7z a dist/archives/hackai-windows-x86_64.zip dist/archives/hackai-windows-x86_64/hackai.exe
-          powershell -NoProfile -Command "(Get-FileHash 'dist\\${{ matrix.artifact }}' -Algorithm SHA256).Hash.ToLower() | Out-File -Encoding ascii 'dist\\${{ matrix.artifact }}.sha256'; (Get-FileHash 'dist\\archives\\hackai-windows-x86_64.zip' -Algorithm SHA256).Hash.ToLower() | Out-File -Encoding ascii 'dist\\archives\\hackai-windows-x86_64.zip.sha256'"
+          7z a dist/archives/hackai-windows-x86_64.zip ./dist/archives/hackai-windows-x86_64/hackai.exe
+
+      - name: Generate checksums
+        shell: bash
+        run: |
+          if command -v sha256sum >/dev/null 2>&1; then
+            SHA="sha256sum"
+          else
+            SHA="shasum -a 256"
+          fi
+          find dist -type f ! -name '*.sha256' | while read -r f; do
+            $SHA "$f" | awk '{print $1}' > "$f.sha256"
+          done
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
@@ -97,7 +116,7 @@ jobs:
     name: Create Release
     needs: build
     runs-on: ubuntu-latest
-    if: always() && needs.build.result == 'success'
+    timeout-minutes: 15
     steps:
       - name: Download all artifacts
         uses: actions/download-artifact@v4
@@ -106,7 +125,7 @@ jobs:
           merge-multiple: true
 
       - name: List artifacts
-        run: ls -la dist/
+        run: ls -laR dist/
 
       - name: Create Release
         uses: softprops/action-gh-release@v2
@@ -121,16 +140,20 @@ jobs:
     name: Publish Installer
     needs: release
     runs-on: ubuntu-latest
-    if: always() && needs.release.result == 'success'
+    timeout-minutes: 10
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.version || github.ref }}
 
       - name: Prepare installer
+        env:
+          VERSION: ${{ inputs.version || github.ref_name }}
+          REPO: ${{ github.repository }}
         run: |
-          VERSION='${{ inputs.version || github.ref_name }}'
-          sed -i "s|REPO=\"hackclub/hackai\"|REPO=\"${{ github.repository }}\"|g" scripts/install-cli.sh
-          sed -i "s|https://your-domain.com/install-cli.sh|https://github.com/${{ github.repository }}/releases/download/${VERSION}/install-cli.sh|g" scripts/install-cli.sh
+          sed -i "s|REPO=\"hackclub/hackai\"|REPO=\"${REPO}\"|g" scripts/install-cli.sh
+          sed -i "s|https://your-domain.com/install-cli.sh|https://github.com/${REPO}/releases/download/${VERSION}/install-cli.sh|g" scripts/install-cli.sh
 
       - name: Upload installer to release
         uses: softprops/action-gh-release@v2
