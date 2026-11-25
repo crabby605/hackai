@@ -1068,7 +1068,7 @@ dependencies = [
 
 [[package]]
 name = "hackai"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "clap",
  "dialoguer",
@@ -1092,7 +1092,7 @@ dependencies = [
 
 [[package]]
 name = "hackai-gitx"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "hackai-schema",
  "hex",
@@ -1104,7 +1104,7 @@ dependencies = [
 
 [[package]]
 name = "hackai-parser"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "hackai-schema",
  "proptest",
@@ -1117,7 +1117,7 @@ dependencies = [
 
 [[package]]
 name = "hackai-paths"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "proptest",
  "serde",
@@ -1127,7 +1127,7 @@ dependencies = [
 
 [[package]]
 name = "hackai-schema"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "serde",
  "thiserror 2.0.21",
@@ -1135,7 +1135,7 @@ dependencies = [
 
 [[package]]
 name = "hackai-scorer"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "hackai-schema",
  "serde",
@@ -1143,7 +1143,7 @@ dependencies = [
 
 [[package]]
 name = "hackai-server"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "axum",
  "base64 0.22.1",
