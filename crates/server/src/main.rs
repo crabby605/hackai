@@ -1,5 +1,8 @@
 #![forbid(unsafe_code)]
 
+// Keep Cargo's dependency graph aware of the newest embedded SQLx migration.
+const _: &str = include_str!("../migrations/0035_shadow_bans.sql");
+
 mod admin;
 mod annotations;
 mod auth;
@@ -92,7 +95,7 @@ async fn main() -> Result<(), BoxError> {
             StatusCode::REQUEST_TIMEOUT,
             Duration::from_secs(10),
         ))
-        .layer(RequestBodyLimitLayer::new(1_048_576))
+        .layer(RequestBodyLimitLayer::new(5_242_880))
         .with_state(state);
 
     let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await?;

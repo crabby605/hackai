@@ -12,6 +12,7 @@ use std::{
     process::Command,
     time::{SystemTime, UNIX_EPOCH},
 };
+use uuid::Uuid;
 
 const HARNESSES: [&str; 5] = ["codex", "claude-code", "opencode", "antigravity", "aider"];
 
@@ -29,11 +30,7 @@ pub fn install(repo: &Path, scope: InstallScope, policy: &str) -> io::Result<()>
         InstallScope::Global => dirs::home_dir()
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "home directory not found"))?,
     };
-    install_codex(&root)?;
-    install_claude(&root)?;
-    install_antigravity(&root)?;
-    install_opencode_plugin(&root)?;
-    install_mcp_configs(&root)?;
+    install_adapters(&root)?;
     install_skill(&root, scope, policy)?;
     println!(
         "Installed adapters and automatic HackAI MCP for Codex, Claude Code, OpenCode, and Antigravity."
@@ -42,6 +39,17 @@ pub fn install(repo: &Path, scope: InstallScope, policy: &str) -> io::Result<()>
         "Aider: run `hackai harness aider -- --message \"…\"` (or pass normal Aider arguments).\nAll adapters retain prompt text only in process memory and write stripped local events."
     );
     Ok(())
+}
+
+/// Install passive local adapters without requiring network access. This is
+/// used by `hackai track`, so a folder starts collecting immediately even if
+/// the optional annotation policy cannot be fetched yet.
+pub fn install_adapters(repo: &Path) -> io::Result<()> {
+    install_codex(repo)?;
+    install_claude(repo)?;
+    install_antigravity(repo)?;
+    install_opencode_plugin(repo)?;
+    install_mcp_configs(repo)
 }
 
 fn install_skill(root: &Path, scope: InstallScope, policy: &str) -> io::Result<()> {
@@ -315,6 +323,40 @@ fn now_ms() -> io::Result<u128> {
         .as_millis())
 }
 
+fn correlation_path(repo: &Path) -> std::path::PathBuf {
+    state::state_dir(repo).join("prompt-correlation.json")
+}
+
+fn read_latest_prompt_id(repo: &Path, harness: &str, session_id: &str) -> Option<String> {
+    let path = correlation_path(repo);
+    let content = fs::read_to_string(path).ok()?;
+    let map: serde_json::Value = serde_json::from_str(&content).ok()?;
+    map.get(harness)
+        .and_then(|h| h.get(session_id))
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_owned())
+}
+
+fn write_latest_prompt_id(
+    repo: &Path,
+    harness: &str,
+    session_id: &str,
+    prompt_id: &str,
+) -> io::Result<()> {
+    let path = correlation_path(repo);
+    let mut map: serde_json::Value = fs::read_to_string(&path)
+        .ok()
+        .and_then(|c| serde_json::from_str(&c).ok())
+        .unwrap_or_else(|| json!({}));
+    map[harness][session_id] = json!(prompt_id);
+    let directory = state::state_dir(repo);
+    fs::create_dir_all(&directory)?;
+    fs::write(
+        path,
+        serde_json::to_vec_pretty(&map).map_err(io::Error::other)?,
+    )
+}
+
 fn append_prompt_event(
     repo: &Path,
     harness: &str,
@@ -323,6 +365,7 @@ fn append_prompt_event(
     pasted_environment_hint: bool,
     signals: &classifier::PromptSignals,
 ) -> io::Result<()> {
+    let prompt_id = Uuid::new_v4().to_string();
     append_line(
         repo,
         "prompt-events.jsonl",
@@ -330,8 +373,10 @@ fn append_prompt_event(
             "schema_version": 1, "harness": harness, "event": event,
             "session_id": session_id, "occurred_at_unix_ms": now_ms()?,
             "pasted_environment_hint": pasted_environment_hint, "signals": signals,
+            "prompt_id": prompt_id,
         }),
-    )
+    )?;
+    write_latest_prompt_id(repo, harness, session_id, &prompt_id)
 }
 
 fn append_harness_event(
@@ -347,15 +392,16 @@ fn append_harness_event(
     } else {
         "observed"
     };
-    append_line(
-        repo,
-        "harness-events.jsonl",
-        &json!({
-            "schema_version": 1, "harness": harness, "event": event,
-            "session_id": session_id, "occurred_at_unix_ms": now_ms()?,
-            "tool_category": tool_category(tool), "outcome": outcome,
-        }),
-    )
+    let prompt_id = read_latest_prompt_id(repo, harness, session_id);
+    let mut obj = json!({
+        "schema_version": 1, "harness": harness, "event": event,
+        "session_id": session_id, "occurred_at_unix_ms": now_ms()?,
+        "tool_category": tool_category(tool), "outcome": outcome,
+    });
+    if let Some(pid) = prompt_id {
+        obj["prompt_id"] = json!(pid);
+    }
+    append_line(repo, "harness-events.jsonl", &obj)
 }
 
 fn append_line(repo: &Path, file_name: &str, value: &Value) -> io::Result<()> {

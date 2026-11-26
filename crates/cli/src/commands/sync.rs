@@ -1,5 +1,5 @@
 use crate::commands::queue_process::process_queue;
-use crate::{api, read_stored_token, state};
+use crate::{api, evidence_export, read_stored_token, state};
 use sha2::Digest;
 use std::{env, fs, io, path::Path, process::Command, time::Duration};
 
@@ -19,8 +19,19 @@ pub fn cmd_sync(
         loop {
             let _ = crate::commands::collect::cmd_collect(&r);
             let _ = crate::processor::process_and_write(&r);
-            if let Err(error) = sync_once(&r, force) {
-                eprintln!("Background sync failed: {error}");
+            if state::server_upload_authorized(&r) {
+                let token = read_stored_token(&r);
+                if let Some(ref token) = token {
+                    let _ = process_queue(
+                        &r,
+                        token,
+                        &std::env::var("HACKAI_SERVER_URL")
+                            .unwrap_or_else(|_| "https://hackai.crabby605.hackclub.app".into()),
+                    );
+                }
+                if let Err(error) = sync_once(&r, force) {
+                    eprintln!("Background sync failed: {error}");
+                }
             }
             std::thread::sleep(Duration::from_secs(BACKGROUND_INTERVAL_SECONDS));
         }
@@ -29,6 +40,12 @@ pub fn cmd_sync(
 }
 
 fn sync_once(r: &Path, force: bool) -> io::Result<()> {
+    if !state::server_upload_consented(r) {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "server upload is disabled for this project; run `hackai track --dashboard` to opt in",
+        ));
+    }
     let server_url = std::env::var("HACKAI_SERVER_URL")
         .unwrap_or_else(|_| "https://hackai.crabby605.hackclub.app".into());
 
@@ -52,6 +69,30 @@ fn sync_once(r: &Path, force: bool) -> io::Result<()> {
                     println!("Git origin: {url}");
                 }
                 state::audit(r, "sync")?;
+
+                // Dashboard tracking is an explicit opt-in.  Send the
+                // derived-only dialogue trace alongside normal sync data so
+                // the dashboard can show what happened in a session.  A
+                // missing local event store is normal for a newly tracked
+                // project and must not make the main sync fail.
+                match evidence_export::build(r) {
+                    Ok(bundle) => {
+                        match api::upload_evidence_bundle(&server_url, token, bundle.value) {
+                            Ok(response) => println!(
+                                "Synced redacted dialogue trace · {} event(s)",
+                                response
+                                    .get("events_stored")
+                                    .and_then(|value| value.as_u64())
+                                    .unwrap_or(0)
+                            ),
+                            Err(error) => {
+                                eprintln!("Derived dialogue trace sync deferred: {error}")
+                            }
+                        }
+                    }
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                    Err(error) => eprintln!("Could not build derived dialogue trace: {error}"),
+                }
 
                 let queue = state::read_queue(r)?;
                 if !queue.is_empty() {

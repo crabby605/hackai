@@ -49,6 +49,9 @@ pub struct SyncPayload {
     pub prompt_metrics: Vec<Value>,
     /// Stripped harness events; never includes prompt text.
     pub prompt_events: Vec<Value>,
+    /// Stripped tool/lifecycle hook records. Advisory telemetry, not time credit.
+    #[serde(default)]
+    pub harness_events: Vec<Value>,
     /// Explicit opt-in agent coaching notes, capped at 50 words each.
     #[serde(default)]
     pub user_feedback: Vec<Value>,
@@ -91,6 +94,31 @@ pub fn read_local_config(root: &Path) -> io::Result<LocalConfig> {
     Ok(config)
 }
 
+pub fn write_local_api_key(root: &Path, api_key: &str) -> io::Result<()> {
+    let existing = read_local_config(root)?;
+    let mut lines = vec![format!("api_key={api_key}")];
+    if let Some(server_url) = existing.server_url {
+        lines.push(format!("server_url={server_url}"));
+    }
+    fs::write(root.join(".hackai.cfg"), format!("{}\n", lines.join("\n")))
+}
+
+pub fn clear_local_api_key(root: &Path) -> io::Result<()> {
+    let existing = read_local_config(root)?;
+    if let Some(server_url) = existing.server_url {
+        fs::write(
+            root.join(".hackai.cfg"),
+            format!("server_url={server_url}\n"),
+        )
+    } else {
+        match fs::remove_file(root.join(".hackai.cfg")) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error),
+        }
+    }
+}
+
 pub fn api_request(
     server_url: &str,
     token: &str,
@@ -98,14 +126,14 @@ pub fn api_request(
     path: &str,
     body: Option<Value>,
 ) -> io::Result<Value> {
-    let normalized = if path.starts_with("/api/v1/") {
+    let normalized = if path.starts_with("/api/v1/") || path.starts_with("/api/v2/") {
         path.to_owned()
     } else if path.starts_with("/v1/") {
         format!("/api{path}")
     } else {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            "API path must begin with /api/v1/ (or /v1/)",
+            "API path must begin with /api/v1/, /api/v2/, or /v1/",
         ));
     };
     let client = Client::new();
@@ -153,7 +181,8 @@ pub fn build_sync_payload(repo_root: &Path) -> io::Result<SyncPayload> {
     let checkpoints = read_local_checkpoints(repo_root);
     let episodes = read_local_episodes(repo_root);
     let prompt_metrics = read_prompt_metrics(repo_root);
-    let prompt_events = read_prompt_events(repo_root);
+    let prompt_events = read_event_log(repo_root, "prompt-events.jsonl")?;
+    let harness_events = read_event_log(repo_root, "harness-events.jsonl")?;
     let user_feedback = read_user_feedback(repo_root);
     let week_ago_millis = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -193,6 +222,7 @@ pub fn build_sync_payload(repo_root: &Path) -> io::Result<SyncPayload> {
         episodes,
         prompt_metrics,
         prompt_events,
+        harness_events,
         user_feedback,
         hardware_hashes: hardware_hashes(),
         environment_class: environment_class(),
@@ -321,19 +351,36 @@ fn adapter_sha256(repo_root: &Path) -> BTreeMap<String, String> {
     .collect()
 }
 
-fn read_prompt_events(repo_root: &Path) -> Vec<Value> {
-    let path = crate::state::state_dir(repo_root).join("prompt-events.jsonl");
-    fs::read_to_string(path)
-        .ok()
-        .into_iter()
-        .flat_map(|content| {
-            content
-                .lines()
-                .filter_map(|line| serde_json::from_str::<Value>(line).ok())
-                .take(500)
-                .collect::<Vec<_>>()
-        })
-        .collect()
+fn read_event_log(repo_root: &Path, name: &str) -> io::Result<Vec<Value>> {
+    let path = crate::state::state_dir(repo_root).join(name);
+    let content = match fs::read_to_string(path) {
+        Ok(content) => content,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error),
+    };
+    parse_event_log(&content)
+}
+
+fn parse_event_log(content: &str) -> io::Result<Vec<Value>> {
+    let lines: Vec<_> = content.lines().collect();
+    let mut events = Vec::new();
+    for (index, line) in lines.iter().enumerate() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        match serde_json::from_str(line) {
+            Ok(event) => events.push(event),
+            // An async hook may still be appending its final record.
+            Err(_) if index + 1 == lines.len() && !content.ends_with('\n') => {}
+            Err(error) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("invalid hook event on line {}: {error}", index + 1),
+                ));
+            }
+        }
+    }
+    Ok(events)
 }
 
 fn read_prompt_metrics(repo_root: &Path) -> Vec<Value> {
@@ -392,10 +439,98 @@ fn annotation_policy_sha256() -> io::Result<String> {
     Ok(format!("{:x}", Sha256::digest(bytes)))
 }
 
+const SYNC_PAYLOAD_LIMIT: usize = 4_718_592; // 4.5 MiB, leaves headroom under server 5 MiB limit
+const EVIDENCE_BUNDLE_LIMIT: usize = 4_718_592; // 4.5 MiB
+
 pub fn sync_to_server(server_url: &str, token: &str, payload: SyncPayload) -> io::Result<Value> {
+    let batches = split_sync_payload(payload, SYNC_PAYLOAD_LIMIT)?;
+    let mut result = Value::Null;
+    let mut counts = BTreeMap::<String, u64>::new();
+    for batch in batches {
+        let response = send_sync_batch(server_url, token, &batch)?;
+        if let Some(fields) = response.as_object() {
+            for (name, value) in fields {
+                if name.ends_with("_synced")
+                    && let Some(count) = value.as_u64()
+                {
+                    let total = counts.entry(name.clone()).or_default();
+                    *total = total.saturating_add(count);
+                }
+            }
+        }
+        result = response;
+    }
+    for (name, count) in counts {
+        result[name] = json!(count);
+    }
+    Ok(result)
+}
+
+/// Partition the immutable snapshot below the server's 1 MiB request limit.
+/// Child IDs are deterministic, so a partially acknowledged upload is safe
+/// to retry without reapplying its successful children.
+fn split_sync_payload(payload: SyncPayload, limit: usize) -> io::Result<Vec<SyncPayload>> {
+    let mut template = serde_json::to_value(payload).map_err(io::Error::other)?;
+    let mut records = Vec::new();
+    for key in [
+        "annotations",
+        "checkpoints",
+        "episodes",
+        "prompt_metrics",
+        "prompt_events",
+        "harness_events",
+        "user_feedback",
+    ] {
+        if let Some(items) = template[key].as_array_mut() {
+            records.extend(std::mem::take(items).into_iter().map(|value| (key, value)));
+        }
+    }
+    let overhead = serde_json::to_vec(&template)
+        .map_err(io::Error::other)?
+        .len()
+        + 128;
+    if overhead >= limit {
+        return Err(io::Error::other("sync metadata exceeds upload limit"));
+    }
+    let mut chunk = template.clone();
+    let mut size = overhead;
+    let mut chunks = Vec::new();
+    for (key, value) in records {
+        let bytes = serde_json::to_vec(&value).map_err(io::Error::other)?.len() + 1;
+        if overhead + bytes > limit {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("one {key} record exceeds the upload limit; retained locally"),
+            ));
+        }
+        if size + bytes > limit {
+            chunks.push(chunk);
+            chunk = template.clone();
+            size = overhead;
+        }
+        if let Some(items) = chunk[key].as_array_mut() {
+            items.push(value);
+        }
+        size += bytes;
+    }
+    chunks.push(chunk);
+    let multipart = chunks.len() > 1;
+    chunks
+        .into_iter()
+        .map(|mut chunk| {
+            if multipart || chunk["batch_id"].is_null() {
+                let bytes = serde_json::to_vec(&chunk).map_err(io::Error::other)?;
+                chunk["batch_id"] = json!(format!("{:x}", Sha256::digest(bytes)));
+            }
+            serde_json::from_value(chunk).map_err(io::Error::other)
+        })
+        .collect()
+}
+
+fn send_sync_batch(server_url: &str, token: &str, payload: &SyncPayload) -> io::Result<Value> {
     let client = Client::new();
     let response = client
-        .post(format!("{server_url}/api/v1/upload"))
+        .post(format!("{server_url}/api/v2/upload"))
         .header("Content-Type", "application/json")
         .bearer_auth(token)
         .json(&payload)
@@ -404,7 +539,21 @@ pub fn sync_to_server(server_url: &str, token: &str, payload: SyncPayload) -> io
 
     match response {
         Ok(resp) if resp.status().is_success() => {
-            let body: Value = resp.json().unwrap_or_default();
+            let body: Value = resp.json().map_err(|error| {
+                io::Error::other(format!("invalid sync acknowledgement: {error}"))
+            })?;
+            if body.get("status").and_then(Value::as_str) != Some("synced")
+                || body.get("project_id").and_then(Value::as_i64).is_none()
+            {
+                return Err(io::Error::other(
+                    "server did not acknowledge sync; retained for retry",
+                ));
+            }
+            if !payload.harness_events.is_empty() && body.get("harness_events_synced").is_none() {
+                return Err(io::Error::other(
+                    "server needs the harness-event migration; retained for retry",
+                ));
+            }
             Ok(body)
         }
         Ok(resp) => {
@@ -420,6 +569,73 @@ pub fn sync_to_server(server_url: &str, token: &str, payload: SyncPayload) -> io
         }
         Err(error) => Err(io::Error::other(format!("sync request failed: {error}"))),
     }
+}
+
+/// Upload an evidence bundle with automatic batching under the server's 5 MiB limit.
+pub fn upload_evidence_bundle(server_url: &str, token: &str, bundle: Value) -> io::Result<Value> {
+    let batches = split_evidence_bundle(bundle, EVIDENCE_BUNDLE_LIMIT)?;
+    let mut total_events = 0_u64;
+    let mut last_response = Value::Null;
+    for batch in batches {
+        let response = api_request(
+            server_url,
+            token,
+            "POST",
+            "/api/v1/evidence-bundles",
+            Some(batch),
+        )?;
+        if let Some(events_stored) = response.get("events_stored").and_then(Value::as_u64) {
+            total_events = total_events.saturating_add(events_stored);
+        }
+        last_response = response;
+    }
+    last_response["events_stored"] = json!(total_events);
+    Ok(last_response)
+}
+
+/// Partition an evidence bundle's events array into chunks under the size limit.
+fn split_evidence_bundle(bundle: Value, limit: usize) -> io::Result<Vec<Value>> {
+    let events = bundle
+        .get("events")
+        .and_then(Value::as_array)
+        .ok_or_else(|| io::Error::other("evidence bundle missing events array"))?;
+    if events.is_empty() {
+        return Ok(vec![bundle]);
+    }
+    let mut template = bundle.clone();
+    template["events"] = json!([]);
+    let overhead = serde_json::to_vec(&template)
+        .map_err(io::Error::other)?
+        .len()
+        + 64;
+    if overhead >= limit {
+        return Err(io::Error::other(
+            "evidence bundle metadata exceeds upload limit",
+        ));
+    }
+    let mut chunks = Vec::new();
+    let mut chunk = template.clone();
+    let mut size = overhead;
+    for event in events {
+        let bytes = serde_json::to_vec(event).map_err(io::Error::other)?.len() + 1;
+        if overhead + bytes > limit {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "one evidence event exceeds the upload limit",
+            ));
+        }
+        if size + bytes > limit {
+            chunks.push(chunk);
+            chunk = template.clone();
+            size = overhead;
+        }
+        if let Some(items) = chunk["events"].as_array_mut() {
+            items.push(event.clone());
+        }
+        size += bytes;
+    }
+    chunks.push(chunk);
+    Ok(chunks)
 }
 
 /// Fetch the server's canonical annotation policy. The policy is public, but

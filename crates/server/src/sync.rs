@@ -6,8 +6,8 @@
 
 use axum::{
     extract::State,
-    http::{HeaderMap, StatusCode},
-    response::Json,
+    http::{HeaderMap, HeaderValue, StatusCode, header},
+    response::{IntoResponse, Json, Response},
     routing::post,
 };
 use serde::{Deserialize, Serialize};
@@ -68,6 +68,8 @@ pub struct SyncRequest {
     /// Privacy-preserving prompt classifications; raw prompt text is rejected.
     #[serde(default)]
     pub prompt_events: Vec<LocalPromptEvent>,
+    #[serde(default)]
+    pub harness_events: Vec<LocalHarnessEvent>,
     /// Daily aggregate prompt metrics; raw prompts are never accepted.
     #[serde(default)]
     pub prompt_metrics: Vec<LocalPromptMetric>,
@@ -79,6 +81,14 @@ pub struct SyncRequest {
     pub hardware_hashes: std::collections::BTreeMap<String, String>,
     #[serde(default = "unknown_environment_class")]
     pub environment_class: String,
+}
+
+/// Bounded v2 transport envelope. Each member is processed through the same
+/// validation and idempotency path as a single upload, so a retry can safely
+/// resend only the batches that did not receive a result.
+#[derive(Deserialize)]
+pub struct BulkSyncRequest {
+    pub batches: Vec<SyncRequest>,
 }
 
 #[derive(Deserialize, Clone)]
@@ -104,7 +114,11 @@ pub struct LocalEpisode {
     pub started_at: LocalTime,
     pub ended_at: LocalTime,
     pub session: String,
+    #[serde(default)]
+    pub harness: Option<String>,
     pub attempts: u32,
+    #[serde(default)]
+    pub pesdo_score_permille: Option<u16>,
     #[serde(default)]
     pub distinct_signatures: Vec<String>,
     #[serde(default)]
@@ -115,6 +129,28 @@ pub struct LocalEpisode {
     pub credited_seconds: u64,
     #[serde(default)]
     pub buckets: Vec<LocalBucket>,
+    /// Per-turn, locally derived classifications. These values are tightly
+    /// validated below so this field cannot become an alternate transcript
+    /// upload channel.
+    #[serde(default)]
+    pub transcript_turns: Vec<LocalTranscriptTurn>,
+}
+
+#[derive(Deserialize, Clone)]
+pub struct LocalTranscriptTurn {
+    pub event_id: String,
+    pub user_act: String,
+    pub act_confidence_permille: u16,
+    pub new_information: String,
+    pub prompt_length_bucket: u8,
+    pub fullcaps: bool,
+    pub answers_question: bool,
+    pub agent_state: String,
+    pub verification: String,
+    pub files_changed_bucket: u8,
+    pub tool_errors: u8,
+    #[serde(default)]
+    pub reason_codes: Vec<String>,
 }
 
 #[derive(Deserialize, Clone)]
@@ -135,6 +171,53 @@ pub struct LocalPromptEvent {
     #[serde(default)]
     pub pasted_environment_hint: bool,
     pub signals: serde_json::Value,
+}
+
+#[derive(Deserialize, Clone)]
+#[serde(deny_unknown_fields)]
+pub struct LocalHarnessEvent {
+    pub schema_version: u16,
+    pub harness: String,
+    pub event: String,
+    pub session_id: String,
+    pub occurred_at_unix_ms: i64,
+    pub tool_category: String,
+    pub outcome: String,
+    #[serde(default)]
+    pub prompt_id: Option<String>,
+}
+
+fn valid_harness_event(event: &LocalHarnessEvent) -> bool {
+    event.schema_version == 1
+        && matches!(
+            event.harness.as_str(),
+            "codex" | "claude-code" | "opencode" | "antigravity" | "aider"
+        )
+        && matches!(
+            event.event.as_str(),
+            "post-tool"
+                | "tool-failure"
+                | "session-end"
+                | "pre-invocation"
+                | "stop"
+                | "tool-before"
+                | "tool-after"
+                | "permission"
+                | "retry"
+                | "user-prompt"
+                | "prompt"
+        )
+        && safe_metadata(&event.session_id, 128)
+        && (0..=253_402_300_799_999).contains(&event.occurred_at_unix_ms)
+        && matches!(
+            event.tool_category.as_str(),
+            "test" | "lint" | "build" | "edit" | "read" | "subagent" | "other"
+        )
+        && matches!(event.outcome.as_str(), "error" | "observed")
+        && event
+            .prompt_id
+            .as_deref()
+            .is_none_or(|id| safe_metadata(id, 64))
 }
 
 #[derive(Deserialize, Clone)]
@@ -185,6 +268,64 @@ fn contains_prompt_text(value: &serde_json::Value) -> bool {
     }
 }
 
+fn valid_transcript_turn(turn: &LocalTranscriptTurn) -> bool {
+    matches!(
+        turn.user_act.as_str(),
+        "specify"
+            | "nudge"
+            | "report_failure"
+            | "steer"
+            | "decide"
+            | "approve"
+            | "reject_or_revert"
+            | "interrupt"
+            | "ask_to_understand"
+            | "meta"
+            | "prompt"
+    ) && matches!(
+        turn.new_information.as_str(),
+        "low" | "medium" | "high" | "none"
+    ) && matches!(
+        turn.agent_state.as_str(),
+        "asked"
+            | "planned"
+            | "explained"
+            | "edited_green"
+            | "edited_red"
+            | "edited_unverified"
+            | "claimed_done_unverified"
+            | "tool_error"
+            | "blocked"
+            | "looping"
+    ) && matches!(
+        turn.verification.as_str(),
+        "green" | "red" | "none" | "unverified"
+    ) && safe_metadata(&turn.event_id, 256)
+        && turn.reason_codes.len() <= 16
+        && turn.reason_codes.iter().all(|code| {
+            (1..=64).contains(&code.len())
+                && code
+                    .bytes()
+                    .all(|byte| byte.is_ascii_uppercase() || byte == b'_')
+        })
+}
+
+fn valid_harness(value: &str) -> bool {
+    matches!(
+        value,
+        "Claude Code"
+            | "Codex"
+            | "OpenCode"
+            | "Gemini"
+            | "Aider"
+            | "Qwen Code"
+            | "Kimi Code"
+            | "Zed"
+            | "GitHub Copilot"
+            | "Your coding agent"
+    )
+}
+
 fn valid_hardware_hashes(values: &std::collections::BTreeMap<String, String>) -> bool {
     values.len() <= 3
         && values.iter().all(|(kind, hash)| {
@@ -201,6 +342,7 @@ pub struct LocalEventId(pub String);
 
 #[derive(Serialize)]
 pub struct SyncResponse {
+    pub api_version: &'static str,
     pub status: &'static str,
     pub project_id: i64,
     pub repository_id: Option<i64>,
@@ -208,6 +350,7 @@ pub struct SyncResponse {
     pub checkpoints_synced: i64,
     pub episodes_synced: i64,
     pub prompt_events_synced: i64,
+    pub harness_events_synced: i64,
     pub prompt_metrics_synced: i64,
     pub user_feedback_synced: i64,
     pub tampered_request: bool,
@@ -217,12 +360,63 @@ pub struct SyncResponse {
     pub github_gate_reason: Option<&'static str>,
 }
 
+#[derive(Serialize)]
+pub struct BulkSyncResponse {
+    pub api_version: &'static str,
+    pub results: Vec<SyncResponse>,
+}
+
 pub fn routes() -> axum::Router<AppState> {
-    // One canonical upload contract. `/sync` remains a compatibility alias
-    // for older CLIs already installed on users' machines.
+    // v2 is the canonical session-trace upload contract. v1 remains available
+    // for installed CLIs and advertises deprecation headers until sunset.
     axum::Router::new()
-        .route("/api/v1/upload", post(sync))
-        .route("/api/v1/sync", post(sync))
+        .route("/api/v2/upload", post(sync))
+        .route("/api/v2/upload/bulk", post(sync_bulk))
+        .route("/api/v1/upload", post(sync_legacy))
+        .route("/api/v1/sync", post(sync_legacy))
+}
+
+async fn sync_bulk(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(req): Json<BulkSyncRequest>,
+) -> Result<Json<BulkSyncResponse>, StatusCode> {
+    if req.batches.is_empty() || req.batches.len() > 20 {
+        return Err(StatusCode::PAYLOAD_TOO_LARGE);
+    }
+    let mut results = Vec::with_capacity(req.batches.len());
+    for batch in req.batches {
+        let Json(result) = sync(State(state.clone()), headers.clone(), Json(batch)).await?;
+        results.push(result);
+    }
+    Ok(Json(BulkSyncResponse {
+        api_version: "v2",
+        results,
+    }))
+}
+
+async fn sync_legacy(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(req): Json<SyncRequest>,
+) -> Result<Response, StatusCode> {
+    let mut response = sync(State(state), headers, Json(req))
+        .await?
+        .into_response();
+    response
+        .headers_mut()
+        .insert("deprecation", HeaderValue::from_static("true"));
+    response.headers_mut().insert(
+        "warning",
+        HeaderValue::from_static(
+            "299 - \"HackAI API v1 upload will be sunset soon; migrate to /api/v2/upload\"",
+        ),
+    );
+    response.headers_mut().insert(
+        header::LINK,
+        HeaderValue::from_static("</api/v2/upload>; rel=\"successor-version\""),
+    );
+    Ok(response)
 }
 
 async fn sync(
@@ -230,6 +424,16 @@ async fn sync(
     headers: HeaderMap,
     Json(req): Json<SyncRequest>,
 ) -> Result<Json<SyncResponse>, StatusCode> {
+    // Reject the complete request before any writes rather than acknowledging
+    // success while silently dropping invalid or oversized episode records.
+    if req.episodes.iter().any(|episode| !valid_episode(episode))
+        || req
+            .harness_events
+            .iter()
+            .any(|event| !valid_harness_event(event))
+    {
+        return Err(StatusCode::UNPROCESSABLE_ENTITY);
+    }
     let sub = crate::auth::extract_current_user(&state.auth, &state.db, &headers)
         .await
         .ok_or(StatusCode::UNAUTHORIZED)?;
@@ -430,6 +634,7 @@ async fn sync(
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
         if already {
             return Ok(Json(SyncResponse {
+                api_version: "v2",
                 status: "synced",
                 project_id,
                 repository_id,
@@ -437,6 +642,7 @@ async fn sync(
                 checkpoints_synced: 0,
                 episodes_synced: 0,
                 prompt_events_synced: 0,
+                harness_events_synced: 0,
                 prompt_metrics_synced: 0,
                 user_feedback_synced: 0,
                 tampered_request,
@@ -494,6 +700,7 @@ async fn sync(
         if marked.is_none() {
             // A concurrent sync already marked this batch; roll back and report synced.
             return Ok(Json(SyncResponse {
+                api_version: "v2",
                 status: "synced",
                 project_id,
                 repository_id,
@@ -501,6 +708,7 @@ async fn sync(
                 checkpoints_synced: 0,
                 episodes_synced: 0,
                 prompt_events_synced: 0,
+                harness_events_synced: 0,
                 prompt_metrics_synced: 0,
                 user_feedback_synced: 0,
                 tampered_request,
@@ -649,28 +857,8 @@ async fn sync(
 
     let mut episodes_synced: i64 = 0;
     for episode in &req.episodes {
-        if episode.session.is_empty()
-            || episode.session.len() > 128
-            || episode.ended_at.0 < episode.started_at.0
-            || episode.distinct_signatures.len() > 64
-            || episode.files_touched.len() > 256
-            || episode.buckets.len() > 512
-            || episode
-                .distinct_signatures
-                .iter()
-                .any(|value| value.len() != 64)
-            || episode
-                .files_touched
-                .iter()
-                .any(|value| value.is_empty() || value.len() > 1_024)
-        {
-            continue;
-        }
         let started_seconds = episode.started_at.0 / 1_000;
         let ended_seconds = episode.ended_at.0 / 1_000;
-        if !episode_claims_within_bounds(episode) {
-            continue;
-        }
         let evidence: Vec<String> = episode
             .buckets
             .iter()
@@ -686,21 +874,24 @@ async fn sync(
             .iter()
             .map(|path| hex::encode(hmac_sha256(files_hmac_secret(&state), path.as_bytes())))
             .collect();
-        sqlx::query(
+        let episode_id: i64 = sqlx::query_scalar(
             "INSERT INTO productive_episodes \
-             (user_id, project_id, session_key, started_at, ended_at, attempts, signatures, files_touched, \
-              human_edit_seconds, agent_edit_seconds, resolved, credited_seconds, evidence_ids, formula_version, batch_id, outcome_factor_permille) \
-             VALUES ($1, $2, $3, to_timestamp($4), to_timestamp($5), $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16) \
+             (user_id, project_id, session_key, harness, started_at, ended_at, attempts, signatures, files_touched, \
+              human_edit_seconds, agent_edit_seconds, resolved, credited_seconds, evidence_ids, formula_version, batch_id, outcome_factor_permille, pesdo_score_permille) \
+             VALUES ($1, $2, $3, $4, to_timestamp($5), to_timestamp($6), $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18) \
              ON CONFLICT (user_id, project_id, session_key, started_at) DO UPDATE SET \
-               ended_at = EXCLUDED.ended_at, attempts = EXCLUDED.attempts, signatures = EXCLUDED.signatures, \
+               harness = EXCLUDED.harness, ended_at = EXCLUDED.ended_at, attempts = EXCLUDED.attempts, signatures = EXCLUDED.signatures, \
                files_touched = EXCLUDED.files_touched, human_edit_seconds = EXCLUDED.human_edit_seconds, \
                agent_edit_seconds = EXCLUDED.agent_edit_seconds, resolved = EXCLUDED.resolved, \
                credited_seconds = EXCLUDED.credited_seconds, evidence_ids = EXCLUDED.evidence_ids, \
-               formula_version = EXCLUDED.formula_version, outcome_factor_permille = EXCLUDED.outcome_factor_permille",
+               formula_version = EXCLUDED.formula_version, outcome_factor_permille = EXCLUDED.outcome_factor_permille, \
+               pesdo_score_permille = EXCLUDED.pesdo_score_permille \
+             RETURNING id",
         )
         .bind(user_id)
         .bind(project_id)
         .bind(&episode.session)
+        .bind(episode.harness.as_deref())
         .bind(started_seconds as f64)
         .bind(ended_seconds as f64)
         .bind(i64::from(episode.attempts))
@@ -714,15 +905,60 @@ async fn sync(
         .bind(i32::from(episode.formula_version))
         .bind(req.batch_id.as_deref())
         .bind(gate.outcome_factor_permille)
-        .execute(&mut *tx)
+        .bind(episode.pesdo_score_permille.map(i32::from))
+        .fetch_one(&mut *tx)
         .await
         .map_err(|error| {
             eprintln!("episode sync insert failed: {error}");
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
+
+        // Replace this episode's derived trace as a unit. The parent upsert
+        // makes retries idempotent; deleting dependent rows prevents stale
+        // classifications after the local processor is rerun.
+        sqlx::query("DELETE FROM derived_session_transcript_turns WHERE episode_id = $1")
+            .bind(episode_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        for (turn_index, turn) in episode.transcript_turns.iter().enumerate() {
+            sqlx::query(
+                "INSERT INTO derived_session_transcript_turns \
+                 (episode_id, turn_index, event_id, user_act, act_confidence_permille, \
+                  new_information, prompt_length_bucket, fullcaps, answers_question, \
+                  agent_state, verification, files_changed_bucket, tool_errors, reason_codes) \
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)",
+            )
+            .bind(episode_id)
+            .bind(i32::try_from(turn_index).map_err(|_| StatusCode::BAD_REQUEST)?)
+            .bind(&turn.event_id)
+            .bind(&turn.user_act)
+            .bind(i32::from(turn.act_confidence_permille))
+            .bind(&turn.new_information)
+            .bind(i16::from(turn.prompt_length_bucket))
+            .bind(turn.fullcaps)
+            .bind(turn.answers_question)
+            .bind(&turn.agent_state)
+            .bind(&turn.verification)
+            .bind(i16::from(turn.files_changed_bucket))
+            .bind(i16::from(turn.tool_errors))
+            .bind(serde_json::json!(turn.reason_codes))
+            .execute(&mut *tx)
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        }
         episodes_synced += 1;
     }
 
+    let mut harness_events_synced = 0;
+    for event in &req.harness_events {
+        sqlx::query("INSERT INTO harness_events (user_id, project_id, harness, session_id, event, occurred_at, tool_category, outcome, prompt_id) VALUES ($1, $2, $3, $4, $5, to_timestamp($6::double precision / 1000), $7, $8, $9) ON CONFLICT DO NOTHING")
+            .bind(user_id).bind(project_id).bind(&event.harness).bind(&event.session_id)
+            .bind(&event.event).bind(event.occurred_at_unix_ms).bind(&event.tool_category).bind(&event.outcome)
+            .bind(&event.prompt_id)
+            .execute(&mut *tx).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        harness_events_synced += 1;
+    }
     let mut prompt_events_synced = 0;
     for event in &req.prompt_events {
         if event.session_id.is_empty()
@@ -803,6 +1039,7 @@ async fn sync(
         .await;
 
     Ok(Json(SyncResponse {
+        api_version: "v2",
         status: "synced",
         project_id,
         repository_id,
@@ -810,6 +1047,7 @@ async fn sync(
         checkpoints_synced,
         episodes_synced,
         prompt_events_synced,
+        harness_events_synced,
         prompt_metrics_synced,
         user_feedback_synced,
         tampered_request,
@@ -990,6 +1228,38 @@ fn hmac_sha256(key: &[u8], message: &[u8]) -> [u8; 32] {
 /// Pure bounds check for an episode's credit claims. Returns false (skip) when
 /// any claim exceeds the i64 range or the elapsed session duration. Never
 /// clamps: out-of-range claims are rejected outright.
+fn valid_episode(episode: &LocalEpisode) -> bool {
+    !(episode.session.is_empty()
+        || episode.session.len() > 128
+        || episode.ended_at.0 < episode.started_at.0
+        || episode.distinct_signatures.len() > 64
+        || episode.files_touched.len() > 256
+        || episode.buckets.len() > 512
+        || episode.transcript_turns.len() > 10_000
+        || episode
+            .distinct_signatures
+            .iter()
+            .any(|value| value.len() != 64)
+        || episode
+            .files_touched
+            .iter()
+            .any(|value| value.is_empty() || value.len() > 1_024)
+        || episode
+            .transcript_turns
+            .iter()
+            .any(|turn| !valid_transcript_turn(turn))
+        || episode
+            .harness
+            .as_deref()
+            .is_some_and(|harness| !valid_harness(harness)))
+        && episode_claims_within_bounds(episode)
+        && episode
+            .pesdo_score_permille
+            .is_none_or(|score| score <= 1000)
+        && (0..=253_402_300_799_999).contains(&episode.started_at.0)
+        && (0..=253_402_300_799_999).contains(&episode.ended_at.0)
+}
+
 fn episode_claims_within_bounds(episode: &LocalEpisode) -> bool {
     let started_seconds = episode.started_at.0 / 1_000;
     let ended_seconds = episode.ended_at.0 / 1_000;
@@ -1045,7 +1315,9 @@ mod tests {
                 started_at: LocalTime(started_ms),
                 ended_at: LocalTime(ended_ms),
                 session: "s".into(),
+                harness: None,
                 attempts: 1,
+                pesdo_score_permille: Some(750),
                 distinct_signatures: vec![],
                 files_touched: vec![],
                 human_edit_seconds: human,
@@ -1053,6 +1325,7 @@ mod tests {
                 resolved: false,
                 credited_seconds: credited,
                 buckets: vec![],
+                transcript_turns: vec![],
             };
         let one_hour = 3600;
         // Within bounds: accepted.

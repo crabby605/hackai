@@ -7,21 +7,23 @@
 
 use crate::state;
 use hackai_schema::{
-    ActorRole, AgentState, DialogueTurn, EventKind, FailureContext, InformationBucket,
+    ActorRole, AgentState, DialogueTurn, EventKind, EventSource, FailureContext, InformationBucket,
     NormalizedEvent, ToolClass, UserAct, VerificationState,
 };
-use hackai_scorer::{FormulaConfig, TimeAccountingConfig, account_time, process_delta};
+use hackai_scorer::{
+    FormulaConfig, PesdoFactors, TimeAccountingConfig, account_time, process_delta, score_pesdo,
+};
 use rusqlite::{Connection, OpenFlags};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use std::fs;
 use std::io;
 use std::path::Path;
 
 const PROCESSOR_VERSION: &str = "dialogue-processor-v1";
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, serde::Deserialize)]
 pub struct ProcessorOutput {
     pub processor_version: &'static str,
     pub formula_version: u16,
@@ -31,13 +33,21 @@ pub struct ProcessorOutput {
     pub episodes: Vec<EpisodeSummary>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, serde::Deserialize)]
 pub struct EpisodeSummary {
     pub episode_id: String,
+    pub started_at_unix_ms: i64,
+    pub ended_at_unix_ms: i64,
     pub event_count: usize,
     pub dialogue_turn_count: usize,
+    pub attempts: u32,
+    pub agent_name: String,
     pub process_delta: i32,
+    /// Deterministic 0–1000 PESDO score. It contains only derived features;
+    /// raw prompts, replies, paths and tool output never leave the machine.
+    pub pesdo_score_permille: u16,
     pub outcome: Outcome,
+    pub resolved: bool,
     pub human_active_millis: u64,
     pub attended_agent_millis: u64,
     pub union_millis: u64,
@@ -46,7 +56,7 @@ pub struct EpisodeSummary {
 /// Outcome deliberately remains separate from process.  A commit alone is
 /// not proof that work shipped, so it remains `Unverified` absent a green
 /// verification event in the episode.
-#[derive(Clone, Copy, Debug, Serialize)]
+#[derive(Clone, Copy, Debug, Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Outcome {
     Shipped,
@@ -57,32 +67,42 @@ pub enum Outcome {
 pub fn process(root: &Path) -> io::Result<ProcessorOutput> {
     let events = read_events(root)?;
     let config = load_formula(root)?;
-    let mut grouped: BTreeMap<String, Vec<NormalizedEvent<String, String>>> = BTreeMap::new();
-    for event in events {
-        grouped
-            .entry(event.session.clone())
-            .or_default()
-            .push(event);
-    }
-
     let mut turns = Vec::new();
     let mut episodes = Vec::new();
-    for (session, mut session_events) in grouped {
-        session_events.sort_by_key(|event| (event.occurred_at.0, event.id.0.clone()));
+    // A tracked directory is one project. Harness session IDs are transport
+    // details, not product boundaries: merge Codex, Claude, Gemini, etc. into
+    // one chronological project timeline and cut collaboration sessions only
+    // on the configured inactivity gap.
+    let mut timeline = events;
+    timeline.sort_by_key(|event| (event.occurred_at.0, event.id.0.clone()));
+    if !timeline.is_empty() {
         let mut start = 0_usize;
-        for index in 1..=session_events.len() {
-            let boundary = index == session_events.len()
-                || session_events[index]
-                    .occurred_at
-                    .0
-                    .saturating_sub(session_events[index - 1].occurred_at.0)
-                    > config.episode_gap_millis;
+        for index in 1..=timeline.len() {
+            let gap = timeline[index]
+                .occurred_at
+                .0
+                .saturating_sub(timeline[index - 1].occurred_at.0);
+            let boundary = index == timeline.len() || gap > config.episode_gap_millis;
             if boundary {
-                let episode_events = &session_events[start..index];
+                if start > 0 && gap > config.episode_gap_millis {
+                    eprintln!(
+                        "Split episode at {}ms gap (>{}ms): {} event(s) in previous episode",
+                        gap,
+                        config.episode_gap_millis,
+                        index - start
+                    );
+                }
+                let episode_events = &timeline[start..index];
                 let episode_id = episode_id(
-                    &session,
+                    "project",
                     episode_events.first().map_or(0, |e| e.occurred_at.0),
                 );
+                let started_at_unix_ms = episode_events
+                    .first()
+                    .map_or(0, |event| event.occurred_at.0);
+                let ended_at_unix_ms = episode_events
+                    .last()
+                    .map_or(started_at_unix_ms, |event| event.occurred_at.0);
                 let episode_turns = label_episode(episode_events, &episode_id, config.version);
                 let accounting = account_time(episode_events, TimeAccountingConfig::default());
                 let process_delta = process_delta(
@@ -93,12 +113,26 @@ pub fn process(root: &Path) -> io::Result<ProcessorOutput> {
                     &config.transition_rules,
                     config.pesdo.process_delta_limit,
                 );
+                let outcome = outcome(episode_events);
+                let pesdo_score_permille = episode_pesdo_score(
+                    episode_events,
+                    &episode_turns,
+                    &accounting,
+                    process_delta,
+                    &config,
+                );
                 episodes.push(EpisodeSummary {
                     episode_id,
+                    started_at_unix_ms,
+                    ended_at_unix_ms,
                     event_count: episode_events.len(),
                     dialogue_turn_count: episode_turns.len(),
+                    attempts: u32::try_from(episode_turns.len()).unwrap_or(u32::MAX),
+                    agent_name: agent_name(episode_events).to_owned(),
                     process_delta,
-                    outcome: outcome(episode_events),
+                    pesdo_score_permille,
+                    resolved: matches!(outcome, Outcome::Shipped),
+                    outcome,
                     human_active_millis: accounting.human_active_millis,
                     attended_agent_millis: accounting.agent_attended_millis,
                     union_millis: accounting.union_millis,
@@ -147,7 +181,175 @@ pub fn process_and_write(root: &Path) -> io::Result<ProcessorOutput> {
         state::state_dir(root).join("dialogue-summary.json"),
         serde_json::to_vec_pretty(&output).map_err(io::Error::other)?,
     )?;
+    // The sync API consumes these derived session rollups. They intentionally
+    // contain no paths, prompt/reply text, tool output, or raw harness IDs.
+    let sync_episodes = output
+        .episodes
+        .iter()
+        .map(|episode| {
+            let transcript_turns = output
+                .dialogue_turns
+                .iter()
+                .filter(|turn| turn.episode_id == episode.episode_id)
+                .map(|turn| {
+                    serde_json::json!({
+                        "event_id": turn.event_id.0,
+                        "user_act": turn.user_act,
+                        "act_confidence_permille": turn.act_confidence_permille,
+                        "new_information": turn.new_information,
+                        "prompt_length_bucket": turn.prompt_length_bucket,
+                        "fullcaps": turn.fullcaps,
+                        "answers_question": turn.answers_question,
+                        "agent_state": turn.agent_state,
+                        "verification": turn.verification,
+                        "files_changed_bucket": turn.files_changed_bucket,
+                        "tool_errors": turn.tool_errors,
+                        "reason_codes": turn.reason_codes,
+                    })
+                })
+                .collect::<Vec<_>>();
+            serde_json::json!({
+                "formula_version": output.formula_version,
+                "started_at": episode.started_at_unix_ms,
+                "ended_at": episode.ended_at_unix_ms,
+                "session": episode.episode_id,
+                "attempts": episode.attempts,
+                "harness": episode.agent_name,
+                "pesdo_score_permille": episode.pesdo_score_permille,
+                "distinct_signatures": [],
+                "files_touched": [],
+                "human_edit_seconds": episode.human_active_millis / 1_000,
+                "agent_edit_seconds": episode.attended_agent_millis / 1_000,
+                "resolved": episode.resolved,
+                "credited_seconds": episode.union_millis / 1_000,
+                "buckets": [],
+                // A derived turn trace only: no prompt/reply text, code,
+                // paths, tool output, or raw harness session ids.
+                "transcript_turns": transcript_turns,
+            })
+        })
+        .collect::<Vec<_>>();
+    fs::write(
+        state::state_dir(root).join("episodes.json"),
+        serde_json::to_vec_pretty(&sync_episodes).map_err(io::Error::other)?,
+    )?;
     Ok(output)
+}
+
+fn agent_name(events: &[NormalizedEvent<String, String>]) -> &'static str {
+    match events
+        .iter()
+        .find(|event| event.role == ActorRole::Agent || event.kind == EventKind::PromptSubmitted)
+        .map(|event| event.source)
+    {
+        Some(EventSource::ClaudeCode) => "Claude Code",
+        Some(EventSource::Codex) => "Codex",
+        Some(EventSource::OpenCode) => "OpenCode",
+        Some(EventSource::Gemini) => "Gemini",
+        Some(EventSource::Aider) => "Aider",
+        Some(EventSource::QwenCode) => "Qwen Code",
+        Some(EventSource::KimiCode) => "Kimi Code",
+        Some(EventSource::ZCode) => "Zed",
+        Some(EventSource::Copilot) => "GitHub Copilot",
+        Some(EventSource::ManualCli) | None => "Your coding agent",
+    }
+}
+
+/// Map grounded, privacy-safe episode signals to the formula's PESD factors.
+/// O is a submission gate, not a per-session penalty, so local progress uses
+/// the active gate value (1000) until a submission verifier says otherwise.
+fn episode_pesdo_score(
+    events: &[NormalizedEvent<String, String>],
+    turns: &[DialogueTurn],
+    accounting: &hackai_scorer::TimeAccounting,
+    process_delta: i32,
+    config: &FormulaConfig,
+) -> u16 {
+    let has_human_prompt = events
+        .iter()
+        .any(|event| event.kind == EventKind::PromptSubmitted && event.role == ActorRole::Human);
+    let presence = if accounting.union_millis == 0 {
+        if has_human_prompt { 900 } else { 700 }
+    } else if accounting.human_active_millis == 0 && has_human_prompt {
+        // Historic transcript imports often lack an OS/edit activity stream.
+        // Unknown presence gets a conservative baseline, never a zero.
+        900
+    } else {
+        u16::try_from(
+            accounting
+                .human_active_millis
+                .saturating_mul(1_000)
+                .checked_div(accounting.union_millis)
+                .unwrap_or(0),
+        )
+        .unwrap_or(1_000)
+        // Transcript sampling can undercount a person's offline review time.
+        // Do not turn that missing observation into a punishment.
+        .clamp(700, 1_000)
+    };
+    let human_evidence = events
+        .iter()
+        .filter(|event| {
+            matches!(event.kind, EventKind::HumanEdit | EventKind::GitCommit)
+                && event.role == ActorRole::Human
+        })
+        .count();
+    let evidence = match human_evidence {
+        0 if has_human_prompt => 900,
+        0 => 750,
+        1 => 950,
+        _ => 1_000,
+    };
+    let specification = if turns.is_empty() {
+        800
+    } else {
+        let total: u32 = turns
+            .iter()
+            .map(|turn| {
+                let information_score = match turn.new_information {
+                    InformationBucket::High => 1_000,
+                    InformationBucket::Medium => 925,
+                    InformationBucket::Low => 850,
+                    InformationBucket::None => 800,
+                };
+                // Directing scope or resolving an agent question is grounded
+                // orchestration even when a harness exposes too little text
+                // metadata to recognize a file/error anchor.
+                let act_score = match turn.user_act {
+                    UserAct::Specify => 1_000,
+                    UserAct::Steer => 950,
+                    UserAct::Decide => 900,
+                    UserAct::ReportFailure if !turn.context.is_contextless() => 900,
+                    UserAct::ReportFailure => 700,
+                    UserAct::Nudge | UserAct::Approve => 750,
+                    UserAct::Interrupt | UserAct::AskToUnderstand | UserAct::Meta => 800,
+                    UserAct::RejectOrRevert => 900,
+                };
+                information_score.max(act_score)
+            })
+            .sum();
+        u16::try_from(total / u32::try_from(turns.len()).unwrap_or(1)).unwrap_or(500)
+    };
+    // D is neutral unless a grounded transition rule observes a repetition or
+    // rubber-stamp pattern. Absence of review telemetry is not a penalty.
+    let diligence = (1_000_i32 + process_delta.saturating_mul(10)).clamp(600, 1_000) as u16;
+    let factors = PesdoFactors {
+        presence,
+        evidence,
+        specification,
+        diligence,
+    };
+    // Log factor values for tuning/debugging
+    eprintln!(
+        "PESDO factors: presence={} evidence={} specification={} diligence={} process_delta={} -> score={}",
+        factors.presence,
+        factors.evidence,
+        factors.specification,
+        factors.diligence,
+        process_delta,
+        score_pesdo(1_000, factors, true, config.pesdo)
+    );
+    u16::try_from(score_pesdo(1_000, factors, true, config.pesdo)).unwrap_or(1_000)
 }
 
 fn read_events(root: &Path) -> io::Result<Vec<NormalizedEvent<String, String>>> {
@@ -742,7 +944,16 @@ fn confidence_for_act(act: UserAct, prompt: Option<&hackai_schema::PromptFeature
 
 fn information_bucket(prompt: Option<&hackai_schema::PromptFeatures>) -> InformationBucket {
     match prompt {
-        Some(features) if features.has_attachment || features.has_code_fence => {
+        Some(features)
+            if features.has_attachment
+                || features.has_code_fence
+                // Long, structured specifications are information-rich even
+                // when the client has no code fence (common in Codex/Claude
+                // planning turns). The threshold is calibrated locally from
+                // the user's feature distribution; no prompt text is stored.
+                || features.char_len > 2_000
+                || (features.is_hypothesis && features.char_len > 800) =>
+        {
             InformationBucket::High
         }
         Some(features) if features.is_hypothesis || features.char_len > 200 => {

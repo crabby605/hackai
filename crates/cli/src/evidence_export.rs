@@ -4,7 +4,8 @@
 //! reads the local normalized event store and emits only the closed server
 //! schema used by `/api/v1/evidence-bundles`.
 
-use crate::state;
+use crate::{processor, state};
+use hackai_schema::{DialogueTurn, VerificationState};
 use rusqlite::{Connection, OpenFlags};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -13,6 +14,7 @@ use std::path::Path;
 
 const PROCESSOR_VERSION: &str = "derived-event-export-v1";
 const FORMULA_VERSION: &str = "pesdo-v1";
+const MAX_EXPORT_EVENTS: usize = 5000;
 
 pub struct EvidenceBundle {
     pub value: Value,
@@ -34,7 +36,7 @@ pub fn build(root: &Path) -> io::Result<EvidenceBundle> {
     let mut query = database
         .prepare(
             "SELECT event_id, occurred_at_ms, source, session_id, payload_json
-             FROM normalized_events ORDER BY occurred_at_ms, event_id LIMIT 1000",
+             FROM normalized_events ORDER BY occurred_at_ms, event_id",
         )
         .map_err(|error| io::Error::other(format!("read event store: {error}")))?;
     let rows = query
@@ -49,17 +51,53 @@ pub fn build(root: &Path) -> io::Result<EvidenceBundle> {
         })
         .map_err(|error| io::Error::other(format!("query event store: {error}")))?;
 
+    // The processor classifies both sides of a turn from grounded local events:
+    // the user's act and the preceding agent reply state.  Associate that
+    // classification with the prompt event only; neither raw prompt nor reply
+    // content crosses this boundary.
+    let dialogue_by_event = processor::process(root)?
+        .dialogue_turns
+        .into_iter()
+        .map(|turn| (turn.event_id.0.clone(), dialogue_trace(&turn)))
+        .collect::<std::collections::HashMap<_, _>>();
+
     let mut events = Vec::new();
     let mut source_counts = std::collections::BTreeMap::new();
+    let mut total_rows = 0;
     for (sequence, row) in rows.enumerate() {
+        if events.len() >= MAX_EXPORT_EVENTS {
+            eprintln!(
+                "Evidence export truncated at {} events (limit={})",
+                events.len(),
+                MAX_EXPORT_EVENTS
+            );
+            break;
+        }
         let (id, occurred_at, source, session, payload) =
             row.map_err(|error| io::Error::other(format!("read event row: {error}")))?;
+        total_rows += 1;
         let payload: Value = serde_json::from_str(&payload)
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-        if let Some(event) = derive_event(&id, occurred_at, &source, &session, &payload, sequence) {
+        if let Some(event) = derive_event_with_dialogue(
+            &id,
+            occurred_at,
+            &source,
+            &session,
+            &payload,
+            sequence,
+            dialogue_by_event.get(&id),
+        ) {
             *source_counts.entry(source).or_insert(0_usize) += 1;
             events.push(event);
         }
+    }
+    if total_rows > MAX_EXPORT_EVENTS {
+        eprintln!(
+            "Evidence export scanned {} total rows, exported {} (limit={})",
+            total_rows,
+            events.len(),
+            MAX_EXPORT_EVENTS
+        );
     }
     if events.is_empty() {
         return Err(io::Error::new(
@@ -93,6 +131,7 @@ pub fn build(root: &Path) -> io::Result<EvidenceBundle> {
     })
 }
 
+#[cfg(test)]
 fn derive_event(
     id: &str,
     occurred_at: i64,
@@ -100,6 +139,18 @@ fn derive_event(
     session: &str,
     payload: &Value,
     sequence: usize,
+) -> Option<Value> {
+    derive_event_with_dialogue(id, occurred_at, source, session, payload, sequence, None)
+}
+
+fn derive_event_with_dialogue(
+    id: &str,
+    occurred_at: i64,
+    source: &str,
+    session: &str,
+    payload: &Value,
+    sequence: usize,
+    dialogue: Option<&Value>,
 ) -> Option<Value> {
     if occurred_at < 0 {
         return None;
@@ -153,6 +204,9 @@ fn derive_event(
     }
     if kind == "PromptSubmitted" {
         event["prompt_features"] = prompt_features(payload);
+        if let Some(dialogue) = dialogue {
+            event["dialogue"] = dialogue.clone();
+        }
     }
     if matches!(event_kind, "test_run" | "build_run")
         && let Some(exit_code) = payload
@@ -163,6 +217,41 @@ fn derive_event(
         event["test_exit_code"] = Value::from(exit_code);
     }
     Some(event)
+}
+
+/// Translate the local schema into the server's deliberately smaller,
+/// closed dialogue schema.  This is a type-only trace: no free text is ever
+/// present in the returned value.
+fn dialogue_trace(turn: &DialogueTurn) -> Value {
+    let confidence = match turn.act_confidence_permille {
+        0..=399 => "low",
+        400..=749 => "medium",
+        _ => "high",
+    };
+    let files_changed_bucket = match turn.files_changed_bucket {
+        0 => "zero",
+        1 => "one",
+        2..=3 => "two_to_three",
+        _ => "four_plus",
+    };
+    let verification = match turn.verification {
+        VerificationState::Green => "green",
+        VerificationState::Red => "red",
+        VerificationState::Unverified | VerificationState::NotApplicable => "none",
+    };
+    json!({
+        "user_act": turn.user_act,
+        "act_confidence_bucket": confidence,
+        "ctx_evidence": turn.context.evidence,
+        "ctx_expectation": turn.context.expectation,
+        "ctx_location": turn.context.location,
+        "agent_state": turn.agent_state,
+        "verification": verification,
+        "files_changed_bucket": files_changed_bucket,
+        "tool_errors": turn.tool_errors,
+        "reply_to_event_id": turn.reply_to.as_ref().map(|id| format!("evt-{}", &hash_text(&id.0)[..32])),
+        "rule_version": format!("v{}", turn.rule_version),
+    })
 }
 
 fn tool_event_kind(payload: &Value) -> &'static str {
