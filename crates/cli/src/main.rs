@@ -22,9 +22,9 @@ mod installer;
 mod mcp;
 mod processor;
 mod state;
+mod tui;
 
 use clap::{Parser, Subcommand, ValueEnum};
-use keyring::Entry;
 use std::{
     io,
     path::{Path, PathBuf},
@@ -37,38 +37,16 @@ fn tokio_rt() -> io::Result<tokio::runtime::Runtime> {
         .map_err(|e| io::Error::other(format!("tokio runtime: {e}")))
 }
 
-const KEYRING_SERVICE: &str = "hackai";
-const KEYRING_USER: &str = "api_token";
-
-fn token_entry(root: &Path) -> io::Result<Entry> {
-    let repo_name = root
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("default");
-    Entry::new(KEYRING_SERVICE, &format!("{KEYRING_USER}_{repo_name}"))
-        .map_err(|e| io::Error::other(format!("keyring entry error: {e}")))
-}
-
 fn read_stored_token(root: &Path) -> Option<String> {
-    token_entry(root)
-        .ok()?
-        .get_password()
-        .ok()
-        .and_then(|t| (!t.trim().is_empty()).then_some(t))
-        .or_else(|| api::read_local_config(root).ok().and_then(|c| c.api_key))
+    api::read_local_config(root).ok().and_then(|c| c.api_key)
 }
 
 fn write_stored_token(root: &Path, token: &str) -> io::Result<()> {
-    token_entry(root)?
-        .set_password(token)
-        .map_err(io::Error::other)
+    api::write_local_api_key(root, token)
 }
 
 fn clear_stored_token(root: &Path) -> io::Result<()> {
-    match token_entry(root)?.delete_credential() {
-        Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
-        Err(error) => Err(io::Error::other(error)),
-    }
+    api::clear_local_api_key(root)
 }
 
 #[derive(Parser)]
@@ -178,6 +156,19 @@ enum Command {
     Process {
         #[arg(default_value = ".")]
         repo: PathBuf,
+    },
+    /// Show the local privacy-safe user/agent transcript trace.
+    Transcript {
+        #[arg(default_value = ".")]
+        repo: PathBuf,
+    },
+    /// Open the local HackAI terminal dashboard.
+    Dash {
+        #[arg(default_value = ".")]
+        repo: PathBuf,
+        /// Fetch optional dashboard totals from the server (may access Keychain).
+        #[arg(long)]
+        online: bool,
     },
     Sync {
         #[arg(default_value = ".")]
@@ -437,6 +428,51 @@ fn cmd_process(repo: &Path) -> io::Result<()> {
     Ok(())
 }
 
+fn cmd_transcript(repo: &Path) -> io::Result<()> {
+    let output = processor::process(&state::root(repo)?)?;
+    if output.dialogue_turns.is_empty() {
+        println!("No dialogue turns found. Run `hackai collect` or `hackai ingest` first.");
+    } else {
+        print!("{}", format_transcript(&output));
+    }
+    Ok(())
+}
+
+fn format_transcript(output: &processor::ProcessorOutput) -> String {
+    let mut rendered = String::new();
+    for episode in &output.episodes {
+        if episode.dialogue_turn_count == 0 {
+            continue;
+        }
+        rendered.push_str(&format!(
+            "Episode {} · {:?} · {} turn(s)\n",
+            episode.episode_id, episode.outcome, episode.dialogue_turn_count
+        ));
+        for turn in output
+            .dialogue_turns
+            .iter()
+            .filter(|turn| turn.episode_id == episode.episode_id)
+        {
+            rendered.push_str(&format!(
+                "  User: {:?} ({}% confidence) · information {:?} · prompt length bucket {}\n",
+                turn.user_act,
+                turn.act_confidence_permille / 10,
+                turn.new_information,
+                turn.prompt_length_bucket
+            ));
+            rendered.push_str(&format!(
+                "  Agent: {:?} · verification {:?} · {} file change(s) · {} tool error(s)\n",
+                turn.agent_state, turn.verification, turn.files_changed_bucket, turn.tool_errors
+            ));
+            if !turn.reason_codes.is_empty() {
+                rendered.push_str(&format!("  Evidence: {}\n", turn.reason_codes.join(", ")));
+            }
+            rendered.push('\n');
+        }
+    }
+    rendered
+}
+
 fn cmd_annotate(
     repo: &Path,
     window: String,
@@ -502,19 +538,30 @@ fn cmd_purge(repo: &Path) -> io::Result<()> {
     crate::commands::track::cmd_untrack(repo, true, false)
 }
 
-fn main() -> io::Result<()> {
-    let cli = Cli::parse();
-    // Automatic update check for interactive user-facing invocations only.
-    // Nonfatal and gated to once per 24 hours.
-    if !matches!(
-        &cli.command,
+/// Background workers must never initiate a conversational update flow. They
+/// are launched automatically (including at login), so treating them like a
+/// person at a terminal produces duplicate update prompts.
+fn should_check_for_updates(command: &Command) -> bool {
+    !matches!(
+        command,
         Command::Update { .. }
             | Command::Mcp
+            | Command::Sync {
+                background: true,
+                ..
+            }
             | Command::Harness {
                 command: HarnessCommand::Hook { .. }
             }
             | Command::CheckpointNudge { .. }
-    ) {
+    )
+}
+
+fn main() -> io::Result<()> {
+    let cli = Cli::parse();
+    // Automatic update check for interactive user-facing invocations only.
+    // Nonfatal and gated to once per 24 hours.
+    if should_check_for_updates(&cli.command) {
         let _ = crate::commands::update::background_check();
     }
 
@@ -565,6 +612,8 @@ fn main() -> io::Result<()> {
             interval_seconds,
         } => cmd_observe(&repo, since_ms, interval_seconds)?,
         Command::Process { repo } => cmd_process(&repo)?,
+        Command::Transcript { repo } => cmd_transcript(&repo)?,
+        Command::Dash { repo, online } => tui::run(&repo, online)?,
         Command::Login {
             token,
             api_key,
@@ -633,9 +682,79 @@ fn main() -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use super::{Command, should_check_for_updates};
+    use crate::processor::{EpisodeSummary, Outcome, ProcessorOutput};
     use crate::state::safe_terminal;
+    use hackai_schema::{
+        AgentState, DialogueTurn, EventId, FailureContext, InformationBucket, UserAct,
+        VerificationState,
+    };
+    use std::path::PathBuf;
+
+    #[test]
+    fn background_sync_never_checks_for_updates() {
+        let command = Command::Sync {
+            repo: PathBuf::from("."),
+            force: false,
+            background: true,
+            install_background: false,
+        };
+
+        assert!(!should_check_for_updates(&command));
+    }
+
     #[test]
     fn strips_controls_and_ansi() {
         assert_eq!(safe_terminal("ok\u{1b}[31mred\u{1b}[0m\nnext"), "okrednext");
+    }
+
+    #[test]
+    fn transcript_shows_classified_user_agent_trace() {
+        let output = ProcessorOutput {
+            processor_version: "test",
+            formula_version: 1,
+            generated_at_unix_ms: 0,
+            event_count: 1,
+            dialogue_turns: vec![DialogueTurn {
+                event_id: EventId("event".into()),
+                reply_to: None,
+                episode_id: "episode".into(),
+                rule_version: 1,
+                user_act: UserAct::ReportFailure,
+                act_confidence_permille: 800,
+                context: FailureContext::default(),
+                new_information: InformationBucket::High,
+                prompt_length_bucket: 2,
+                fullcaps: false,
+                repeat_distance_bucket: 0,
+                answers_question: false,
+                latency_bucket: 1,
+                agent_state: AgentState::EditedRed,
+                verification: VerificationState::Red,
+                files_changed_bucket: 2,
+                tool_errors: 1,
+                reason_codes: vec!["VERIFICATION_RED".into()],
+            }],
+            episodes: vec![EpisodeSummary {
+                episode_id: "episode".into(),
+                started_at_unix_ms: 0,
+                ended_at_unix_ms: 0,
+                event_count: 1,
+                dialogue_turn_count: 1,
+                attempts: 1,
+                agent_name: "Codex".into(),
+                process_delta: 0,
+                pesdo_score_permille: 0,
+                outcome: Outcome::EndedRed,
+                resolved: false,
+                human_active_millis: 0,
+                attended_agent_millis: 0,
+                union_millis: 0,
+            }],
+        };
+        let rendered = crate::format_transcript(&output);
+        assert!(rendered.contains("User: ReportFailure (80% confidence)"));
+        assert!(rendered.contains("Agent: EditedRed · verification Red"));
+        assert!(rendered.contains("Evidence: VERIFICATION_RED"));
     }
 }

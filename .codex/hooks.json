@@ -1,0 +1,37 @@
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "async": true,
+            "command": "hackai harness hook --repo . --harness codex --event post-tool",
+            "type": "command"
+          }
+        ],
+        "matcher": ".*"
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "command": "hackai harness hook --repo . --harness codex --event session-end",
+            "type": "command"
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "async": true,
+            "command": "hackai harness hook --repo . --harness codex --event user-prompt",
+            "type": "command"
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -47,6 +47,14 @@ pub async fn health(State(state): State<AppState>) -> Result<Json<HealthStatus>,
     }))
 }
 
+/// A deliberately unserious diagnostics endpoint.
+pub async fn teapot() -> (StatusCode, Json<serde_json::Value>) {
+    (
+        StatusCode::IM_A_TEAPOT,
+        Json(serde_json::json!({"message": "I'm a teapot"})),
+    )
+}
+
 /// Public profile visible without auth. Only returned when profile_public = TRUE.
 #[derive(Serialize)]
 pub struct PublicProfile {
@@ -117,7 +125,9 @@ pub async fn leaderboard(
          FROM users u
          LEFT JOIN ep ON ep.user_id = u.id
          LEFT JOIN pc ON pc.owner_id = u.id
-         WHERE u.profile_public = TRUE AND u.leaderboard_opt_out = FALSE
+         WHERE u.profile_public = TRUE
+           AND u.leaderboard_opt_out = FALSE
+           AND u.shadow_banned = FALSE
          ORDER BY credited_seconds DESC, u.username ASC
          LIMIT 100",
     )
@@ -150,6 +160,9 @@ pub async fn leaderboard(
 pub fn routes() -> axum::Router<AppState> {
     axum::Router::new()
         .route("/api/v1/health", get(health))
+        .route("/api/v2/teapot", get(teapot))
+        .route("/api/v2/coffee", get(teapot))
+        .route("/api/v2/kettle", get(teapot))
         .route("/api/v1/leaderboard", get(leaderboard))
         .route("/api/v1/users/{username}", get(public_profile))
 }

@@ -25,16 +25,9 @@ pub fn process_queue(root: &Path, api_token: &str, server_url: &str) -> io::Resu
             continue;
         }
         let repo_path = Path::new(&item.repo_root);
-        let remote_url = crate::git::git_remote_url(repo_path).unwrap_or_default();
-        let head_sha = crate::git::git_head_sha(repo_path).unwrap_or_default();
-        let mut payload = item.payload.clone();
-        payload.remote_url = Some(remote_url);
-        payload.head_sha = Some(head_sha);
-        payload.annotations = state::read_local_annotations(repo_path);
-        payload.checkpoints = state::read_local_checkpoints(repo_path);
-        payload.episodes = state::read_local_episodes(repo_path);
-
-        match api::sync_to_server(server_url, api_token, payload) {
+        // The batch ID identifies this exact snapshot, even if local work
+        // changed after a response was lost. New work gets a new batch.
+        match api::sync_to_server(server_url, api_token, item.payload.clone()) {
             Ok(body) => {
                 println!(
                     "Synced {} · {} episode(s)",
@@ -49,7 +42,7 @@ pub fn process_queue(root: &Path, api_token: &str, server_url: &str) -> io::Resu
             }
             Err(e) => {
                 eprintln!("Sync failed for {}: {e}", item.project_name);
-                item.attempts += 1;
+                item.attempts = item.attempts.saturating_add(1);
                 item.next_attempt_at = now.saturating_add(backoff_seconds(item.attempts));
                 // Keep failed work durable; transient outages can last longer
                 // than five attempts and must not silently discard activity.

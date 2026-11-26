@@ -24,6 +24,7 @@ pub struct ProjectSummary {
     pub human_seconds: i64,
     pub agent_seconds: i64,
     pub last_active: Option<String>,
+    pub avg_pesdo_score_permille: Option<i32>,
 }
 
 #[derive(Serialize)]
@@ -36,6 +37,7 @@ pub struct ProjectDetail {
     pub last_active: Option<String>,
     pub episodes: i64,
     pub rollups: Vec<RollupDay>,
+    pub git_url: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -57,6 +59,13 @@ pub struct EpisodeSummary {
     pub credited_seconds: i64,
     pub resolved: bool,
     pub attempts: i32,
+    pub pesdo_score_permille: Option<i32>,
+}
+
+#[derive(Deserialize)]
+pub struct UpdateProjectRequest {
+    pub name: Option<String>,
+    pub git_url: Option<String>,
 }
 
 pub async fn projects_list(
@@ -79,7 +88,8 @@ pub async fn projects_list(
              COALESCE(SUM(r.credited_seconds), 0)::BIGINT AS total_seconds, \
              COALESCE(SUM(r.human_seconds), 0)::BIGINT AS human_seconds, \
              COALESCE(SUM(r.agent_seconds), 0)::BIGINT AS agent_seconds, \
-             to_char(MAX(r.day), 'YYYY-MM-DD') AS last_active \
+             to_char(MAX(r.day), 'YYYY-MM-DD') AS last_active, \
+             (SELECT ROUND(AVG(e.pesdo_score_permille))::INTEGER FROM productive_episodes e WHERE e.project_id = p.id AND e.user_id = $1) AS avg_pesdo_score_permille \
           FROM projects p \
           LEFT JOIN rollups r ON r.project_id = p.id AND r.user_id = $1 \
           WHERE p.owner_id = $1 AND p.deleted_at IS NULL \
@@ -96,7 +106,8 @@ pub async fn projects_list(
              COALESCE(SUM(r.credited_seconds), 0)::BIGINT AS total_seconds, \
              COALESCE(SUM(r.human_seconds), 0)::BIGINT AS human_seconds, \
              COALESCE(SUM(r.agent_seconds), 0)::BIGINT AS agent_seconds, \
-             to_char(MAX(r.day), 'YYYY-MM-DD') AS last_active \
+             to_char(MAX(r.day), 'YYYY-MM-DD') AS last_active, \
+             (SELECT ROUND(AVG(e.pesdo_score_permille))::INTEGER FROM productive_episodes e WHERE e.project_id = p.id AND e.user_id = $1) AS avg_pesdo_score_permille \
           FROM projects p \
           LEFT JOIN rollups r ON r.project_id = p.id AND r.user_id = $1 \
           WHERE p.owner_id = $1 AND p.deleted_at IS NULL \
@@ -113,7 +124,8 @@ pub async fn projects_list(
              COALESCE(SUM(r.credited_seconds), 0)::BIGINT AS total_seconds, \
              COALESCE(SUM(r.human_seconds), 0)::BIGINT AS human_seconds, \
              COALESCE(SUM(r.agent_seconds), 0)::BIGINT AS agent_seconds, \
-             to_char(MAX(r.day), 'YYYY-MM-DD') AS last_active \
+             to_char(MAX(r.day), 'YYYY-MM-DD') AS last_active, \
+             (SELECT ROUND(AVG(e.pesdo_score_permille))::INTEGER FROM productive_episodes e WHERE e.project_id = p.id AND e.user_id = $1) AS avg_pesdo_score_permille \
           FROM projects p \
           LEFT JOIN rollups r ON r.project_id = p.id AND r.user_id = $1 \
           WHERE p.owner_id = $1 AND p.deleted_at IS NULL \
@@ -130,7 +142,8 @@ pub async fn projects_list(
              COALESCE(SUM(r.credited_seconds), 0)::BIGINT AS total_seconds, \
              COALESCE(SUM(r.human_seconds), 0)::BIGINT AS human_seconds, \
              COALESCE(SUM(r.agent_seconds), 0)::BIGINT AS agent_seconds, \
-             to_char(MAX(r.day), 'YYYY-MM-DD') AS last_active \
+             to_char(MAX(r.day), 'YYYY-MM-DD') AS last_active, \
+             (SELECT ROUND(AVG(e.pesdo_score_permille))::INTEGER FROM productive_episodes e WHERE e.project_id = p.id AND e.user_id = $1) AS avg_pesdo_score_permille \
           FROM projects p \
           LEFT JOIN rollups r ON r.project_id = p.id AND r.user_id = $1 \
           WHERE p.owner_id = $1 AND p.deleted_at IS NULL \
@@ -147,7 +160,8 @@ pub async fn projects_list(
              COALESCE(SUM(r.credited_seconds), 0)::BIGINT AS total_seconds, \
              COALESCE(SUM(r.human_seconds), 0)::BIGINT AS human_seconds, \
              COALESCE(SUM(r.agent_seconds), 0)::BIGINT AS agent_seconds, \
-             to_char(MAX(r.day), 'YYYY-MM-DD') AS last_active \
+             to_char(MAX(r.day), 'YYYY-MM-DD') AS last_active, \
+             (SELECT ROUND(AVG(e.pesdo_score_permille))::INTEGER FROM productive_episodes e WHERE e.project_id = p.id AND e.user_id = $1) AS avg_pesdo_score_permille \
           FROM projects p \
           LEFT JOIN rollups r ON r.project_id = p.id AND r.user_id = $1 \
           WHERE p.owner_id = $1 AND p.deleted_at IS NULL \
@@ -164,7 +178,8 @@ pub async fn projects_list(
              COALESCE(SUM(r.credited_seconds), 0)::BIGINT AS total_seconds, \
              COALESCE(SUM(r.human_seconds), 0)::BIGINT AS human_seconds, \
              COALESCE(SUM(r.agent_seconds), 0)::BIGINT AS agent_seconds, \
-             to_char(MAX(r.day), 'YYYY-MM-DD') AS last_active \
+             to_char(MAX(r.day), 'YYYY-MM-DD') AS last_active, \
+             (SELECT ROUND(AVG(e.pesdo_score_permille))::INTEGER FROM productive_episodes e WHERE e.project_id = p.id AND e.user_id = $1) AS avg_pesdo_score_permille \
           FROM projects p \
           LEFT JOIN rollups r ON r.project_id = p.id AND r.user_id = $1 \
           WHERE p.owner_id = $1 AND p.deleted_at IS NULL \
@@ -202,6 +217,9 @@ pub async fn projects_list(
             last_active: row
                 .try_get("last_active")
                 .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
+            avg_pesdo_score_permille: row
+                .try_get("avg_pesdo_score_permille")
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
         });
     }
     Ok(Json(out))
@@ -224,7 +242,7 @@ pub async fn project_detail(
                  COALESCE(r.total_seconds, 0)::BIGINT AS total_seconds, \
                  COALESCE(r.human_seconds, 0)::BIGINT AS human_seconds, \
                  COALESCE(r.agent_seconds, 0)::BIGINT AS agent_seconds, \
-                 r.last_active, \
+                 r.last_active, repo.remote_url AS git_url, \
                  COALESCE(e.episodes, 0)::BIGINT AS episodes \
           FROM projects p \
           LEFT JOIN ( \
@@ -235,6 +253,7 @@ pub async fn project_detail(
                   to_char(MAX(day), 'YYYY-MM-DD') AS last_active \
               FROM rollups WHERE user_id = $1 GROUP BY project_id \
           ) r ON r.project_id = p.id \
+          LEFT JOIN repositories repo ON repo.project_id = p.id \
           LEFT JOIN ( \
               SELECT project_id, COUNT(*) AS episodes \
               FROM productive_episodes WHERE user_id = $1 GROUP BY project_id \
@@ -286,6 +305,7 @@ pub async fn project_detail(
         last_active: project.try_get("last_active").ok().flatten(),
         episodes: project.try_get("episodes").unwrap_or(0),
         rollups: rollup_days,
+        git_url: project.try_get("git_url").ok().flatten(),
     }))
 }
 
@@ -306,7 +326,7 @@ pub async fn project_detail_by_name(
                  COALESCE(r.total_seconds, 0)::BIGINT AS total_seconds, \
                  COALESCE(r.human_seconds, 0)::BIGINT AS human_seconds, \
                  COALESCE(r.agent_seconds, 0)::BIGINT AS agent_seconds, \
-                 r.last_active, \
+                 r.last_active, repo.remote_url AS git_url, \
                  COALESCE(e.episodes, 0)::BIGINT AS episodes \
           FROM projects p \
           LEFT JOIN ( \
@@ -317,6 +337,7 @@ pub async fn project_detail_by_name(
                   to_char(MAX(day), 'YYYY-MM-DD') AS last_active \
               FROM rollups WHERE user_id = $1 GROUP BY project_id \
           ) r ON r.project_id = p.id \
+          LEFT JOIN repositories repo ON repo.project_id = p.id \
           LEFT JOIN ( \
               SELECT project_id, COUNT(*) AS episodes \
               FROM productive_episodes WHERE user_id = $1 GROUP BY project_id \
@@ -369,6 +390,7 @@ pub async fn project_detail_by_name(
         last_active: project.try_get("last_active").ok().flatten(),
         episodes: project.try_get("episodes").unwrap_or(0),
         rollups: rollup_days,
+        git_url: project.try_get("git_url").ok().flatten(),
     }))
 }
 
@@ -389,7 +411,7 @@ pub async fn project_episodes(
                  to_char(started_at, 'YYYY-MM-DD HH24:MI') AS started_at, \
                  to_char(ended_at, 'YYYY-MM-DD HH24:MI') AS ended_at, \
                  EXTRACT(EPOCH FROM (ended_at - started_at))::BIGINT AS duration, \
-                 human_edit_seconds, agent_edit_seconds, credited_seconds, resolved, attempts \
+                human_edit_seconds, agent_edit_seconds, credited_seconds, resolved, attempts, pesdo_score_permille \
           FROM productive_episodes \
           WHERE project_id = $1 AND user_id = $2 \
           ORDER BY started_at DESC \
@@ -413,6 +435,7 @@ pub async fn project_episodes(
             credited_seconds: row.try_get("credited_seconds").unwrap_or(0),
             resolved: row.try_get("resolved").unwrap_or(false),
             attempts: row.try_get("attempts").unwrap_or(1),
+            pesdo_score_permille: row.try_get("pesdo_score_permille").ok(),
         })
         .collect();
 
@@ -446,7 +469,7 @@ pub async fn project_episodes_by_name(
                  to_char(started_at, 'YYYY-MM-DD HH24:MI') AS started_at, \
                  to_char(ended_at, 'YYYY-MM-DD HH24:MI') AS ended_at, \
                  EXTRACT(EPOCH FROM (ended_at - started_at))::BIGINT AS duration, \
-                 human_edit_seconds, agent_edit_seconds, credited_seconds, resolved, attempts \
+                human_edit_seconds, agent_edit_seconds, credited_seconds, resolved, attempts, pesdo_score_permille \
           FROM productive_episodes \
           WHERE project_id = $1 AND user_id = $2 \
           ORDER BY started_at DESC \
@@ -470,6 +493,7 @@ pub async fn project_episodes_by_name(
             credited_seconds: row.try_get("credited_seconds").unwrap_or(0),
             resolved: row.try_get("resolved").unwrap_or(false),
             attempts: row.try_get("attempts").unwrap_or(1),
+            pesdo_score_permille: row.try_get("pesdo_score_permille").ok(),
         })
         .collect();
 
@@ -501,6 +525,81 @@ pub async fn delete_project(
     Ok(Json(
         serde_json::json!({ "status": "deleted", "id": deleted.try_get::<i64, _>("id").unwrap_or(id) }),
     ))
+}
+
+pub async fn update_project(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+    Json(body): Json<UpdateProjectRequest>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let sub = crate::auth::extract_current_user(&state.auth, &state.db, &headers)
+        .await
+        .ok_or(StatusCode::UNAUTHORIZED)?;
+    let user_id = get_user_id(&state.db, &sub)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let name = body.name.map(|value| value.trim().to_owned());
+    if name.as_ref().is_some_and(|value| {
+        value.is_empty() || value.len() > 128 || value.chars().any(char::is_control)
+    }) {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    let git_url = body.git_url.map(|value| value.trim().to_owned());
+    if git_url.as_ref().is_some_and(|value| {
+        value.len() > 2_048
+            || url::Url::parse(value)
+                .ok()
+                .is_none_or(|parsed| !matches!(parsed.scheme(), "https" | "http"))
+    }) {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    if name.is_none() && git_url.is_none() {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
+    let mut transaction = state
+        .db
+        .begin()
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let updated = sqlx::query(
+        "UPDATE projects SET name = COALESCE($1, name) WHERE id = $2 AND owner_id = $3 AND deleted_at IS NULL RETURNING name",
+    )
+    .bind(name.as_deref())
+    .bind(id)
+    .bind(user_id)
+    .fetch_optional(&mut *transaction)
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+    .ok_or(StatusCode::NOT_FOUND)?;
+
+    if let Some(remote_url) = git_url.as_deref() {
+        let result = sqlx::query("UPDATE repositories SET remote_url = $1 WHERE project_id = $2")
+            .bind(remote_url)
+            .bind(id)
+            .execute(&mut *transaction)
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        if result.rows_affected() == 0 {
+            sqlx::query("INSERT INTO repositories (project_id, remote_url) VALUES ($1, $2)")
+                .bind(id)
+                .bind(remote_url)
+                .execute(&mut *transaction)
+                .await
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        }
+    }
+    transaction
+        .commit()
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(Json(serde_json::json!({
+        "status": "updated",
+        "name": updated.try_get::<String, _>("name").unwrap_or_default(),
+        "git_url": git_url,
+    })))
 }
 
 pub async fn merge_projects(
@@ -568,7 +667,7 @@ pub fn routes() -> axum::Router<AppState> {
         .route("/api/v1/projects", axum::routing::get(projects_list))
         .route(
             "/api/v1/projects/{id}",
-            axum::routing::delete(delete_project),
+            axum::routing::delete(delete_project).patch(update_project),
         )
         .route(
             "/api/v1/projects/{id}/detail",

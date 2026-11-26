@@ -66,7 +66,7 @@ pub fn cmd_update(yes: bool) -> io::Result<()> {
 
     let proceed = if yes {
         true
-    } else if std::io::stdout().is_terminal() {
+    } else if std::io::stdin().is_terminal() && std::io::stdout().is_terminal() {
         Confirm::new()
             .with_prompt("Download and install this update?")
             .default(false)
@@ -92,7 +92,12 @@ pub fn background_check() -> io::Result<()> {
     if std::env::var_os("HACKAI_NO_UPDATE_CHECK").is_some() {
         return Ok(());
     }
-    if !std::io::stdout().is_terminal() || !is_release_installed() {
+    // A background process can inherit a terminal-like stdout while having no
+    // usable stdin. Require both before presenting a confirmation prompt.
+    if !std::io::stdin().is_terminal()
+        || !std::io::stdout().is_terminal()
+        || !is_release_installed()
+    {
         return Ok(());
     }
     if !update_due() {

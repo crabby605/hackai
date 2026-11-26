@@ -47,6 +47,34 @@ pub fn state_dir(root: &Path) -> PathBuf {
     }
 }
 
+const UPLOAD_CONSENT_FILE: &str = "server-upload-consent";
+const UPLOAD_AUTHORIZED_FILE: &str = "server-upload-authorized";
+
+pub fn server_upload_consented(root: &Path) -> bool {
+    fs::read_to_string(state_dir(root).join(UPLOAD_CONSENT_FILE))
+        .map(|value| value.trim() == "yes")
+        .unwrap_or(false)
+}
+
+pub fn write_server_upload_consent(root: &Path, consented: bool) -> io::Result<()> {
+    let directory = state_dir(root);
+    fs::create_dir_all(&directory)?;
+    fs::write(
+        directory.join(UPLOAD_CONSENT_FILE),
+        if consented { "yes\n" } else { "no\n" },
+    )
+}
+
+pub fn server_upload_authorized(root: &Path) -> bool {
+    state_dir(root).join(UPLOAD_AUTHORIZED_FILE).exists()
+}
+
+pub fn mark_server_upload_authorized(root: &Path) -> io::Result<()> {
+    let directory = state_dir(root);
+    fs::create_dir_all(&directory)?;
+    fs::write(directory.join(UPLOAD_AUTHORIZED_FILE), b"authorized\n")
+}
+
 #[derive(Debug, Deserialize, Serialize)]
 pub struct TrackerConfig {
     pub checkpoint_turn_interval: u16,
@@ -426,7 +454,6 @@ fn claude_project_key(repo_root: &Path) -> String {
     repo_root
         .to_string_lossy()
         .replace(['/', '\\'], "-")
-        .trim_start_matches('-')
         .to_owned()
 }
 
@@ -440,6 +467,16 @@ pub fn discover_codex_rollouts() -> io::Result<Vec<PathBuf>> {
         Some(base) => discover_files_named(&base.join("sessions"), "rollout-", ".jsonl"),
         None => Ok(Vec::new()),
     }
+}
+
+/// Gemini CLI keeps resumable chats beneath a per-user temporary project tree.
+/// The directory name is not stable across releases, so callers must still
+/// confirm the structured working directory inside each JSONL record.
+pub fn discover_gemini_sessions() -> io::Result<Vec<PathBuf>> {
+    let Some(home) = dirs::home_dir() else {
+        return Ok(Vec::new());
+    };
+    discover_files_named(&home.join(".gemini/tmp"), "session-", ".jsonl")
 }
 
 /// Discover OpenCode's SQLite database. Prefer its own path resolver, then
@@ -604,6 +641,25 @@ pub fn append_normalized_events(root: &Path, events: &[serde_json::Value]) -> io
         .commit()
         .map_err(|error| io::Error::other(format!("commit event store: {error}")))?;
     Ok(inserted)
+}
+
+/// Replace one harness' derived history during discovery. Transcript event
+/// IDs are stable, but a previous CLI version associated Codex rollouts using
+/// a loose text search. Rebuilding only that harness preserves all git and
+/// other-harness observations.
+pub fn remove_events_from_source(root: &Path, source: &str) -> io::Result<usize> {
+    let path = event_store_path(root);
+    if !path.exists() {
+        return Ok(0);
+    }
+    let database = rusqlite::Connection::open(path)
+        .map_err(|error| io::Error::other(format!("open event store: {error}")))?;
+    database
+        .execute(
+            "DELETE FROM normalized_events WHERE source = ?1",
+            rusqlite::params![source],
+        )
+        .map_err(|error| io::Error::other(format!("remove harness events: {error}")))
 }
 
 fn contains_raw_transcript_field(value: &serde_json::Value) -> bool {

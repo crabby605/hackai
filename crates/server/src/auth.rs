@@ -244,6 +244,47 @@ fn self_client() -> reqwest::Client {
     reqwest::Client::new()
 }
 
+/// Turn the provider's Slack nickname into the username shape accepted by the
+/// profile API. This is used only while provisioning a new account: users who
+/// subsequently choose a different username keep that choice.
+fn slack_username(nickname: Option<&str>, subject: &str) -> String {
+    let source = nickname
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or(subject);
+    let mut username = String::with_capacity(30);
+    let mut previous_hyphen = false;
+
+    for character in source.chars() {
+        if username.len() == 30 {
+            break;
+        }
+        if character.is_ascii_alphanumeric() {
+            username.push(character.to_ascii_lowercase());
+            previous_hyphen = false;
+        } else if !username.is_empty() && !previous_hyphen {
+            username.push('-');
+            previous_hyphen = true;
+        }
+    }
+    while username.ends_with('-') {
+        username.pop();
+    }
+    if username.len() < 3 {
+        let suffix: String = subject
+            .chars()
+            .filter(|character| character.is_ascii_alphanumeric())
+            .take(24)
+            .map(|character| character.to_ascii_lowercase())
+            .collect();
+        username = format!("slack-{}", suffix);
+        username.truncate(30);
+        while username.ends_with('-') {
+            username.pop();
+        }
+    }
+    username
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct IdClaims {
     pub sub: String,
@@ -600,6 +641,15 @@ async fn callback(
             .map(|slack_id| format!("https://cachet.dunkirk.sh/users/{slack_id}/r"))
     });
 
+    let existing_username: Option<String> =
+        sqlx::query_scalar("SELECT username FROM users WHERE auth_subject = $1")
+            .bind(&claims.sub)
+            .fetch_optional(&app.db)
+            .await
+            .map_err(|e| AuthError::Upstream(format!("user lookup: {e}")))?;
+    let username = existing_username
+        .unwrap_or_else(|| slack_username(claims.nickname.as_deref(), &claims.sub));
+
     sqlx::query(
         "INSERT INTO users (username, auth_subject, display_name, email, slack_id, avatar_url) \
          VALUES ($1, $2, $3, $4, $5, $6) \
@@ -607,7 +657,7 @@ async fn callback(
            display_name = EXCLUDED.display_name, email = EXCLUDED.email, \
            slack_id = EXCLUDED.slack_id, avatar_url = EXCLUDED.avatar_url",
     )
-    .bind(claims.sub.clone())
+    .bind(username)
     .bind(claims.sub.clone())
     .bind(claims.name.or(claims.nickname))
     .bind(claims.email)
@@ -672,7 +722,8 @@ impl IntoResponse for AuthError {
 #[cfg(test)]
 mod tests {
     use super::{
-        clear_session_cookie, cookie_value, safe_continue_path, session_cookie, session_cookie_name,
+        clear_session_cookie, cookie_value, safe_continue_path, session_cookie,
+        session_cookie_name, slack_username,
     };
     use axum::http::{HeaderMap, header};
 
@@ -698,6 +749,15 @@ mod tests {
         ] {
             assert_eq!(safe_continue_path(path), None);
         }
+    }
+
+    #[test]
+    fn uses_slack_nickname_for_initial_username() {
+        assert_eq!(slack_username(Some("Vihaan"), "opaque-subject"), "vihaan");
+        assert_eq!(
+            slack_username(Some("Build Team!"), "opaque-subject"),
+            "build-team"
+        );
     }
 
     #[test]

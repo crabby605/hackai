@@ -1,0 +1,38 @@
+{
+  "hackai": {
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "command": "hackai harness hook --repo . --harness antigravity --event post-tool",
+            "timeout": 5,
+            "type": "command"
+          }
+        ],
+        "matcher": ".*"
+      }
+    ],
+    "PreInvocation": [
+      {
+        "hooks": [
+          {
+            "command": "hackai harness hook --repo . --harness antigravity --event pre-invocation",
+            "timeout": 5,
+            "type": "command"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "command": "hackai harness hook --repo . --harness antigravity --event stop",
+            "timeout": 5,
+            "type": "command"
+          }
+        ]
+      }
+    ]
+  }
+}

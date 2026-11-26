@@ -1,8 +1,8 @@
 use crate::{TranscriptHarness, processor, state};
 use hackai_parser::{
     parse_aider_markdown, parse_claude_jsonl, parse_codex_jsonl, parse_copilot_jsonl,
-    parse_gemini_jsonl, parse_kimi_code_jsonl, parse_opencode_jsonl, parse_opencode_sqlite,
-    parse_qwen_code_jsonl, parse_z_code_jsonl,
+    parse_gemini_jsonl, parse_kimi_code_jsonl, parse_opencode_jsonl,
+    parse_opencode_sqlite_for_directory, parse_qwen_code_jsonl, parse_z_code_jsonl,
 };
 use hackai_schema::UnixMillis;
 use hackai_scorer::TimeAccountingConfig;
@@ -41,7 +41,7 @@ pub fn cmd_ingest(
             session,
         ),
         TranscriptHarness::Opencode if source.extension().is_some_and(|ext| ext == "db") => {
-            parse_opencode_sqlite(source, project, None::<String>, session)
+            parse_opencode_sqlite_for_directory(source, &root, project, None::<String>, session)
         }
         TranscriptHarness::Opencode => parse_opencode_jsonl(
             &fs::read_to_string(source)?,

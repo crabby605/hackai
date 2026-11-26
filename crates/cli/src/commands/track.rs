@@ -1,5 +1,5 @@
 use crate::{api, harness, read_stored_token, state, tokio_rt};
-use dialoguer::{Confirm, Select};
+use dialoguer::Confirm;
 use std::{fs, io, path::Path};
 
 pub fn cmd_track(repo: &Path, local_only: bool, dashboard: bool) -> io::Result<()> {
@@ -7,13 +7,29 @@ pub fn cmd_track(repo: &Path, local_only: bool, dashboard: bool) -> io::Result<(
     let s = state::state_dir(&r);
     let first_setup = !s.exists();
 
+    if !Confirm::new()
+        .with_prompt("Track this directory?")
+        .default(true)
+        .interact()
+        .map_err(io::Error::other)?
+    {
+        println!("Nothing changed.");
+        return Ok(());
+    }
+
     let include_dashboard = if local_only {
         false
     } else if dashboard {
         true
     } else {
+        println!(
+            "Server upload sends time, tool/test outcomes, and a derived dialogue trace (for example: Your action and the agent result). It never sends raw prompts, replies, source code, or file paths."
+        );
+        println!(
+            "The optional MCP feedback action stores a short, explicitly requested coaching note for your account; it does not upload conversation text."
+        );
         Confirm::new()
-            .with_prompt("Include this project in your dashboard (requires auth)?")
+            .with_prompt("Opt in to server upload and mandatory background sync?")
             .default(false)
             .interact()
             .map_err(io::Error::other)?
@@ -25,78 +41,36 @@ pub fn cmd_track(repo: &Path, local_only: bool, dashboard: bool) -> io::Result<(
     );
     fs::create_dir_all(&s)?;
     fs::write(s.join("tracked"), b"v1\n")?;
+    state::write_server_upload_consent(&r, include_dashboard)?;
     state::audit(&r, "track")?;
 
-    if first_setup && !local_only {
-        let install = Confirm::new()
-            .with_prompt("Install HackAI hooks, automatic MCP, and the annotation skill?")
-            .default(true)
-            .interact()
-            .map_err(io::Error::other)?;
-        if install {
-            let options = ["This project only", "Globally for my user"];
-            let selected = Select::new()
-                .with_prompt("Where should HackAI install the integration?")
-                .items(&options)
-                .default(0)
-                .interact()
-                .map_err(io::Error::other)?;
-            let server_url = std::env::var("HACKAI_SERVER_URL")
-                .unwrap_or_else(|_| "https://hackai.crabby605.hackclub.app".into());
-            let policy = api::fetch_annotation_policy(&server_url).map_err(|error| {
-                io::Error::other(format!("could not fetch the server policy: {error}"))
-            })?;
-            harness::install(
-                &r,
-                if selected == 0 {
-                    harness::InstallScope::Project
-                } else {
-                    harness::InstallScope::Global
-                },
-                &policy,
-            )?;
+    if first_setup {
+        // Local adapters are always safe to install: their payloads are
+        // reduced locally and no data leaves the machine from this step.
+        harness::install_adapters(&r)?;
+        let server_url = std::env::var("HACKAI_SERVER_URL")
+            .unwrap_or_else(|_| "https://hackai.crabby605.hackclub.app".into());
+        match api::fetch_annotation_policy(&server_url) {
+            Ok(policy) => harness::install(&r, harness::InstallScope::Project, &policy)?,
+            Err(error) => eprintln!(
+                "Adapters installed; optional annotation skill will retry when online: {error}"
+            ),
+        }
+        if let Err(error) = crate::commands::collect::cmd_collect(&r) {
+            eprintln!("Initial local collection deferred: {error}");
         }
     }
 
     if include_dashboard {
-        let server_url = std::env::var("HACKAI_SERVER_URL")
-            .unwrap_or_else(|_| "https://hackai.crabby605.hackclub.app".into());
-        if let Some(token) = read_stored_token(&r) {
-            let rt = tokio_rt()?;
-            rt.block_on(async {
-                let payload = api::build_sync_payload(&r).unwrap_or_else(|_| api::SyncPayload {
-                    batch_id: Some(uuid::Uuid::new_v4().to_string()),
-                    annotation_policy_sha256: String::new(),
-                    cli_release_sha256: String::new(),
-                    adapter_sha256: std::collections::BTreeMap::new(),
-                    project_name: r
-                        .file_name()
-                        .and_then(|name| name.to_str())
-                        .map(str::to_owned),
-                    remote_url: None,
-                    head_sha: None,
-                    commits: vec![],
-                    annotations: vec![],
-                    checkpoints: vec![],
-                    episodes: vec![],
-                    prompt_metrics: vec![],
-                    prompt_events: vec![],
-                    user_feedback: vec![],
-                    hardware_hashes: std::collections::BTreeMap::new(),
-                    environment_class: "unknown".to_owned(),
-                });
-                let _ = api::sync_to_server(&server_url, &token, payload);
-            });
-            println!("Project queued for dashboard sync.");
-            if let Err(error) = crate::commands::sync::install_background_worker(&r) {
-                eprintln!("Could not install background sync: {error}");
-            }
-        } else {
-            println!("Not authenticated. Run `hackai login` to enable dashboard sync.");
+        if let Err(error) = crate::commands::sync::install_background_worker(&r) {
+            eprintln!("Could not install background sync: {error}");
         }
+        println!(
+            "Background sync is ready. Run `hackai login` when you want to authorize server access."
+        );
     } else {
         println!(
-            "Tracking enabled for this repository (local-only). No paths or transcript text are stored."
+            "Tracking was not enabled for server upload. Run `hackai track --dashboard` when you want to opt in."
         );
     }
     Ok(())

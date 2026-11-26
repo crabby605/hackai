@@ -2,6 +2,7 @@ import { getJson } from "@/app/lib/api"
 import { notFound } from "next/navigation"
 import { Card, CardContent } from "@/components/ui/card"
 import { buttonVariants } from "@/components/ui/button"
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { cn } from "@/lib/utils"
 import Link from "next/link"
 
@@ -134,27 +135,25 @@ export default async function ProjectPage({ params }: { params: Promise<{ name: 
       {project.rollups?.length && (
         <div>
           <h2>Daily rollups (last 60 days)</h2>
-          <div className="overflow-x-auto mt-2">
-            <table className="w-full text-sm">
-              <thead>
-                <tr className="text-left text-muted-foreground border-b">
-                  <th className="pb-2">Day</th>
-                  <th className="pb-2">Total</th>
-                  <th className="pb-2">Human</th>
-                  <th className="pb-2">Agent</th>
-                </tr>
-              </thead>
-              <tbody>
+          <div className="mt-2">
+            <Table>
+              <TableHeader><TableRow>
+                <TableHead>Day</TableHead>
+                <TableHead>Total</TableHead>
+                <TableHead>Human</TableHead>
+                <TableHead>Agent</TableHead>
+              </TableRow></TableHeader>
+              <TableBody>
                 {project.rollups.map((r) => (
-                  <tr key={r.day} className="border-b">
-                    <td className="py-2">{r.day}</td>
-                    <td className="py-2">{formatDuration(r.total_seconds)}</td>
-                    <td className="py-2">{formatDuration(r.human_seconds)}</td>
-                    <td className="py-2">{formatDuration(r.agent_seconds)}</td>
-                  </tr>
+                  <TableRow key={r.day}>
+                    <TableCell>{r.day}</TableCell>
+                    <TableCell>{formatDuration(r.total_seconds)}</TableCell>
+                    <TableCell>{formatDuration(r.human_seconds)}</TableCell>
+                    <TableCell>{formatDuration(r.agent_seconds)}</TableCell>
+                  </TableRow>
                 ))}
-              </tbody>
-            </table>
+              </TableBody>
+            </Table>
           </div>
         </div>
       )}

@@ -25,6 +25,10 @@ type Account = {
   projects: Project[]; episodes: Episode[]; commits: Commit[]; installations: { id: string }[]
 }
 type EvidenceBundle = { bundle_id: string; processor_version: string; formula_version: string; received_at: string; event_count: number; preview_approved: boolean }
+type AdminUnderstanding = {
+  understanding: { turns_observed: number; high_information_turns: number; verified_green_turns: number; red_verification_turns: number; recovery_loop_or_tool_error_turns: number; scope: string }
+  turns: { episode_id: string; turn: number; user_act: string; new_information: string; agent_state: string; verification: string; reason_codes: string[] }[]
+}
 
 function jsonList(value: string) {
   try {
@@ -47,9 +51,10 @@ export default async function AccountReview({ params }: { params: Promise<{ id: 
   const me = await getJson<Me>("/api/v1/me")
   if (!me?.is_admin) notFound()
   const { id } = await params
-  const [account, bundles] = await Promise.all([
+  const [account, bundles, understanding] = await Promise.all([
     getJson<Account>(`/api/v1/admin/users/${encodeURIComponent(id)}`),
     getJson<EvidenceBundle[]>(`/api/v1/admin/users/${encodeURIComponent(id)}/evidence-bundles`),
+    getJson<AdminUnderstanding>(`/api/v1/admin/users/${encodeURIComponent(id)}/understanding`),
   ])
   if (!account) notFound()
 
@@ -59,6 +64,10 @@ export default async function AccountReview({ params }: { params: Promise<{ id: 
 
     <h2>Projects</h2>
     <div className="space-y-2">{account.projects.length ? account.projects.map((project) => <Card key={project.id} size="sm"><CardContent className="flex items-center justify-between gap-4"><div><div className="font-semibold">{project.name}</div><div className="text-xs text-muted-foreground">Derived activity summary</div></div><div className="text-sm font-medium">{project.episodes} episodes · {Math.round(project.credited_seconds / 60)} min</div></CardContent></Card>) : <p className="text-sm text-muted-foreground">No projects recorded.</p>}</div>
+
+    <h2 style={{ marginTop: "2rem" }}>Internal collaboration understanding</h2>
+    <p className="heading-copy">Admin-only derived classifications. This is not available to the user and never contains raw prompts, replies, code, paths, or tool output.</p>
+    {understanding ? <><div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-5"><Card size="sm"><CardContent><b>{understanding.understanding.turns_observed}</b><div className="item-meta">turns observed</div></CardContent></Card><Card size="sm"><CardContent><b>{understanding.understanding.high_information_turns}</b><div className="item-meta">high-information</div></CardContent></Card><Card size="sm"><CardContent><b>{understanding.understanding.verified_green_turns}</b><div className="item-meta">verified green</div></CardContent></Card><Card size="sm"><CardContent><b>{understanding.understanding.red_verification_turns}</b><div className="item-meta">red verification</div></CardContent></Card><Card size="sm"><CardContent><b>{understanding.understanding.recovery_loop_or_tool_error_turns}</b><div className="item-meta">loops / tool errors</div></CardContent></Card></div><Accordion className="mt-3 rounded-lg border" defaultValue={[]} multiple>{understanding.turns.map((turn) => <AccordionItem key={`${turn.episode_id}-${turn.turn}`} value={`${turn.episode_id}-${turn.turn}`}><AccordionTrigger className="px-4 hover:no-underline"><span>Episode {turn.episode_id} · turn {turn.turn}</span><span className="item-meta">{turn.user_act} → {turn.agent_state} → {turn.verification}</span></AccordionTrigger><AccordionContent className="px-4 pb-4"><p className="item-meta">Information: {turn.new_information} · signals: {turn.reason_codes.join(", ") || "none"}</p></AccordionContent></AccordionItem>)}</Accordion></> : <p className="text-sm text-muted-foreground">No derived turn classifications have been synced yet.</p>}
 
     <h2 style={{ marginTop: "2rem" }}>Claimed commits / GitHub observation</h2>
     <p className="heading-copy">Commit times and diff counts are client claims. O=1000 only when the server observes a public repository and the submitted HEAD on GitHub; other historical commits remain claims.</p>

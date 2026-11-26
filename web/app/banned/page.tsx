@@ -1,3 +1,5 @@
+import { Button } from "@/components/ui/button"
+
 export default function BannedPage() {
   return (
     <main className="page">
@@ -5,7 +7,7 @@ export default function BannedPage() {
         <p className="eyebrow">Access restricted</p>
         <h1>Your account is currently suspended.</h1>
         <p>If you think this is a mistake, contact the HackAI administrator for a review.</p>
-        <form action="/logout" method="post"><button className="button button-primary" type="submit">Sign out</button></form>
+        <form action="/logout" method="post"><Button type="submit">Sign out</Button></form>
       </section>
     </main>
   )

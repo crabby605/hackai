@@ -141,6 +141,10 @@ pub fn routes() -> axum::Router<AppState> {
         .route("/api/v1/admin/sessions", get(list_sessions))
         .route("/api/v1/admin/users", get(list_users))
         .route("/api/v1/admin/users/{id}", get(get_user_review))
+        .route(
+            "/api/v1/admin/users/{id}/understanding",
+            get(user_understanding),
+        )
         .route("/api/v1/admin/users/{id}/admin", post(set_admin))
         .route("/api/v1/admin/users/{id}/projects", get(user_projects))
         .route("/api/v1/admin/activity", get(list_activity))
@@ -151,8 +155,79 @@ pub fn routes() -> axum::Router<AppState> {
         )
         .route("/api/v1/admin/users/{id}/ban", post(ban_user))
         .route("/api/v1/admin/users/{id}/unban", post(unban_user))
+        .route("/api/v1/admin/users/{id}/shadow-ban", post(shadow_ban_user))
+        .route("/api/v1/admin/users/{id}/unshadow", post(unshadow_user))
         .route("/api/v1/admin/users/{id}/cooldown", post(set_cooldown))
         .route("/api/v1/admin/hardware-ban", post(ban_hardware))
+}
+
+/// Detailed derived-only collaboration profile for staff review. This is never
+/// routed through owner-facing APIs: users receive coaching language from the
+/// session-improvement endpoint instead of this internal classification view.
+async fn user_understanding(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let _ = require_admin(&state, &headers).await?;
+    let rows = sqlx::query(
+        "SELECT t.episode_id, t.turn_index, t.event_id, t.user_act, \
+                t.act_confidence_permille, t.new_information, t.prompt_length_bucket, \
+                t.fullcaps, t.answers_question, t.agent_state, t.verification, \
+                t.files_changed_bucket, t.tool_errors, t.reason_codes::TEXT AS reason_codes \
+         FROM derived_session_transcript_turns t \
+         JOIN productive_episodes e ON e.id = t.episode_id \
+         WHERE e.user_id = $1 ORDER BY t.episode_id DESC, t.turn_index ASC LIMIT 1000",
+    )
+    .bind(id)
+    .fetch_all(&state.db)
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let mut high_information = 0_i64;
+    let mut verified_green = 0_i64;
+    let mut verification_red = 0_i64;
+    let mut recovery_loops = 0_i64;
+    let turns: Vec<serde_json::Value> = rows
+        .into_iter()
+        .map(|row| {
+            let information = row.try_get::<String, _>("new_information").unwrap_or_default();
+            let agent_state = row.try_get::<String, _>("agent_state").unwrap_or_default();
+            let verification = row.try_get::<String, _>("verification").unwrap_or_default();
+            high_information += i64::from(information == "high");
+            verified_green += i64::from(verification == "green");
+            verification_red += i64::from(verification == "red");
+            recovery_loops += i64::from(agent_state == "looping" || agent_state == "tool_error");
+            serde_json::json!({
+                "episode_id": row.try_get::<i64, _>("episode_id").unwrap_or_default().to_string(),
+                "turn": row.try_get::<i32, _>("turn_index").unwrap_or_default() + 1,
+                "event_id": row.try_get::<String, _>("event_id").unwrap_or_default(),
+                "user_act": row.try_get::<String, _>("user_act").unwrap_or_default(),
+                "act_confidence_permille": row.try_get::<i32, _>("act_confidence_permille").unwrap_or_default(),
+                "new_information": information,
+                "prompt_length_bucket": row.try_get::<i16, _>("prompt_length_bucket").unwrap_or_default(),
+                "fullcaps": row.try_get::<bool, _>("fullcaps").unwrap_or(false),
+                "answers_question": row.try_get::<bool, _>("answers_question").unwrap_or(false),
+                "agent_state": agent_state,
+                "verification": verification,
+                "files_changed_bucket": row.try_get::<i16, _>("files_changed_bucket").unwrap_or_default(),
+                "tool_errors": row.try_get::<i16, _>("tool_errors").unwrap_or_default(),
+                "reason_codes": serde_json::from_str::<serde_json::Value>(&row.try_get::<String, _>("reason_codes").unwrap_or_else(|_| "[]".into())).unwrap_or_else(|_| serde_json::json!([])),
+            })
+        })
+        .collect();
+    Ok(Json(serde_json::json!({
+        "user_id": id.to_string(),
+        "understanding": {
+            "turns_observed": turns.len(),
+            "high_information_turns": high_information,
+            "verified_green_turns": verified_green,
+            "red_verification_turns": verification_red,
+            "recovery_loop_or_tool_error_turns": recovery_loops,
+            "scope": "derived classifications only; never raw prompt text, replies, code, paths, or tool output"
+        },
+        "turns": turns,
+    })))
 }
 
 async fn insights(
@@ -475,6 +550,46 @@ async fn unban_user(
 
     audit_mutation(&state, admin_user_id, "unban", id).await;
 
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn shadow_ban_user(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+) -> Result<StatusCode, StatusCode> {
+    let admin_user_id = require_admin(&state, &headers).await?;
+    let row = sqlx::query(
+        "UPDATE users SET shadow_banned = TRUE WHERE id = $1 AND is_admin = FALSE RETURNING id",
+    )
+    .bind(id)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    if row.is_none() {
+        return Err(StatusCode::CONFLICT);
+    }
+    audit_mutation(&state, admin_user_id, "shadow_ban", id).await;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn unshadow_user(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+) -> Result<StatusCode, StatusCode> {
+    let admin_user_id = require_admin(&state, &headers).await?;
+    let row = sqlx::query(
+        "UPDATE users SET shadow_banned = FALSE WHERE id = $1 AND is_admin = FALSE RETURNING id",
+    )
+    .bind(id)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    if row.is_none() {
+        return Err(StatusCode::CONFLICT);
+    }
+    audit_mutation(&state, admin_user_id, "unshadow", id).await;
     Ok(StatusCode::NO_CONTENT)
 }
 

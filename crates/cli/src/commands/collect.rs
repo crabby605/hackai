@@ -67,10 +67,12 @@ pub fn cmd_collect(repo: &Path) -> io::Result<()> {
         }
     }
 
-    let checkout = root.to_string_lossy();
+    // Codex stores every rollout in one global tree. Rebuild just this
+    // harness so history imported by an older loose matcher is corrected.
+    let removed_codex_events = state::remove_events_from_source(&root, "Codex")?;
     for source in state::discover_codex_rollouts()? {
         let transcript = fs::read_to_string(&source)?;
-        if !transcript.contains(checkout.as_ref()) {
+        if !codex_rollout_matches_root(&transcript, &root) {
             continue;
         }
         let session = discovered_session_name(&source);
@@ -92,10 +94,79 @@ pub fn cmd_collect(repo: &Path) -> io::Result<()> {
         }
     }
 
-    if state::discover_opencode_database().is_some() {
-        println!(
-            "OpenCode database found but not auto-imported: session-to-repository attribution is not yet verified. Use `hackai ingest opencode <path>` for an explicitly selected source."
-        );
+    let removed_gemini_events = state::remove_events_from_source(&root, "Gemini")?;
+    for source in state::discover_gemini_sessions()? {
+        let transcript = fs::read_to_string(&source)?;
+        if !gemini_session_matches_root(&transcript, &root) {
+            continue;
+        }
+        match crate::commands::ingest::cmd_ingest(
+            &root,
+            TranscriptHarness::Gemini,
+            &source,
+            discovered_session_name(&source),
+            None,
+        ) {
+            Ok(()) => imported_sources += 1,
+            Err(error) => {
+                failures += 1;
+                eprintln!(
+                    "Could not ingest Gemini transcript {}: {error}",
+                    source.display()
+                );
+            }
+        }
+    }
+
+    let removed_aider_events = state::remove_events_from_source(&root, "Aider")?;
+    for source in [
+        root.join(".aider.chat.history.md"),
+        root.join(".aider.input.history"),
+    ] {
+        if !source.is_file() {
+            continue;
+        }
+        match crate::commands::ingest::cmd_ingest(
+            &root,
+            TranscriptHarness::Aider,
+            &source,
+            discovered_session_name(&source),
+            Some(file_modified_millis(&source)?),
+        ) {
+            Ok(()) => imported_sources += 1,
+            Err(error) => {
+                failures += 1;
+                eprintln!(
+                    "Could not ingest Aider history {}: {error}",
+                    source.display()
+                );
+            }
+        }
+    }
+
+    let removed_opencode_events = state::remove_events_from_source(&root, "OpenCode")?;
+    if let Some(database) = state::discover_opencode_database() {
+        match crate::commands::ingest::cmd_ingest(
+            &root,
+            TranscriptHarness::Opencode,
+            &database,
+            format!(
+                "opencode-{}",
+                root.file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or("project")
+            ),
+            None,
+        ) {
+            Ok(()) => imported_sources += 1,
+            Err(error) => {
+                failures += 1;
+                eprintln!(
+                    "Could not ingest OpenCode database {}: {error}",
+                    database.display()
+                );
+            }
+        }
     }
 
     // Git observation runs after transcript ingestion so agent commits already
@@ -103,8 +174,65 @@ pub fn cmd_collect(repo: &Path) -> io::Result<()> {
     if let Err(error) = collect_git_evidence(&root, None) {
         eprintln!("Could not collect local git evidence: {error}");
     }
-    println!("Collector imported {imported_sources} source(s); {failures} source(s) failed.");
+    println!(
+        "Collector imported {imported_sources} source(s); rebuilt {} harness event(s); {failures} source(s) failed.",
+        removed_codex_events
+            + removed_gemini_events
+            + removed_aider_events
+            + removed_opencode_events
+    );
     Ok(())
+}
+
+/// Match Codex only on a structured working-directory field. Arbitrary
+/// transcript text could mention a project path while working elsewhere.
+fn codex_rollout_matches_root(transcript: &str, root: &Path) -> bool {
+    transcript
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .any(|value| contains_matching_working_directory(&value, root))
+}
+
+/// Gemini CLI v1 stores a SHA-256 `projectHash` in its session header rather
+/// than a working directory. Its current implementation hashes the project
+/// root string verbatim, which gives us a directory-safe match without
+/// examining prompt or tool text.
+fn gemini_session_matches_root(transcript: &str, root: &Path) -> bool {
+    let expected = format!("{:x}", Sha256::digest(root.to_string_lossy().as_bytes()));
+    transcript
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .any(|value| value.get("projectHash").and_then(Value::as_str) == Some(expected.as_str()))
+}
+
+fn contains_matching_working_directory(value: &Value, root: &Path) -> bool {
+    match value {
+        Value::Object(fields) => fields.iter().any(|(key, value)| {
+            if matches!(key.as_str(), "cwd" | "workdir" | "working_directory")
+                && let Some(candidate) = value.as_str()
+            {
+                return same_or_nested_directory(candidate, root);
+            }
+            contains_matching_working_directory(value, root)
+        }),
+        Value::Array(values) => values
+            .iter()
+            .any(|value| contains_matching_working_directory(value, root)),
+        _ => false,
+    }
+}
+
+fn same_or_nested_directory(candidate: &str, root: &Path) -> bool {
+    let candidate = Path::new(candidate);
+    candidate == root || candidate.starts_with(root)
+}
+
+fn file_modified_millis(path: &Path) -> io::Result<i64> {
+    let modified = fs::metadata(path)?.modified().map_err(io::Error::other)?;
+    modified
+        .duration_since(UNIX_EPOCH)
+        .map_err(io::Error::other)
+        .and_then(|value| i64::try_from(value.as_millis()).map_err(io::Error::other))
 }
 
 pub fn cmd_observe(
@@ -386,5 +514,32 @@ mod tests {
             attribute_commit(1_000_000 + 600_000, &attribution),
             hackai_schema::ActorRole::Unknown
         );
+    }
+
+    #[test]
+    fn codex_history_requires_a_structured_working_directory() {
+        let root = Path::new("/work/hackai");
+        assert!(codex_rollout_matches_root(
+            r#"{"type":"turn_context","payload":{"cwd":"/work/hackai"}}"#,
+            root
+        ));
+        assert!(!codex_rollout_matches_root(
+            r#"{"type":"response_item","payload":{"text":"cd /work/hackai"}}"#,
+            root
+        ));
+    }
+
+    #[test]
+    fn gemini_history_matches_the_project_hash() {
+        let root = Path::new("/work/hackai");
+        let hash = format!("{:x}", Sha256::digest(b"/work/hackai"));
+        assert!(gemini_session_matches_root(
+            &format!(r#"{{"projectHash":"{hash}","kind":"main"}}"#),
+            root
+        ));
+        assert!(!gemini_session_matches_root(
+            r#"{"projectHash":"other","kind":"main"}"#,
+            root
+        ));
     }
 }

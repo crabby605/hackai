@@ -1,128 +1,105 @@
 #!/usr/bin/env bash
-# HackAI production deployment script
-# Usage: ./scripts/deploy.sh [host] [path]
+# Build the Linux release locally and deploy API + standalone web to production.
+# Usage: ./scripts/deploy.sh [--api-only|--web-only] [host]
 
 set -euo pipefail
 
-HOST="${1:-crabby605@hackclub}"
-DEPLOY_PATH="${2:-/opt/hackai}"
-REPO="https://github.com/crabby605/hackai.git"
-BRANCH="main"
+API_ONLY=false
+WEB_ONLY=false
+if [ "${1:-}" = "--api-only" ]; then
+  API_ONLY=true
+  shift
+elif [ "${1:-}" = "--web-only" ]; then
+  WEB_ONLY=true
+  shift
+fi
+HOST="${1:-crabby605@hackclub.app}"
+TARGET="x86_64-unknown-linux-gnu"
+API_DIR="/root/hackai/bin"
+WEB_DIR="/opt/hackai-web"
 
-echo "🚀 Deploying HackAI to $HOST:$DEPLOY_PATH"
+# Some SSH gateways return 255 after a successful remote command. Require an
+# explicit completion marker emitted only after every remote command succeeds;
+# never treat a transport error alone as proof of deployment success.
+run_remote() {
+  local marker="HACKAI_DEPLOY_OK_$$"
+  local output
+  local status=0
+  output=$(ssh -T "$HOST" "set -euo pipefail
+$1
+printf '\\n%s\\n' '$marker'") || status=$?
+  if ! grep -qx "$marker" <<< "$output"; then
+    printf '%s\n' "$output" >&2
+    if [ "$status" -eq 0 ]; then status=1; fi
+    return "$status"
+  fi
+  printf '%s\n' "$output" | sed "/^${marker}$/d"
+}
 
-# 1. Build release binaries locally
-echo "📦 Building release binaries..."
-cargo build --workspace --release
+if [ "$WEB_ONLY" = false ]; then
+  echo "Building API for $TARGET..."
+  cargo zigbuild --release --target "$TARGET" -p hackai-server \
+    --bin hackai-server --bin hackai-migrate
+fi
 
-# 2. Build web production bundle
-echo "🌐 Building Next.js production bundle..."
-cd web
-NEXT_PUBLIC_API_URL="https://hackai.crabby605.hackclub.app" npm run build
-cd ..
+if [ "$API_ONLY" = false ]; then
+  echo "Building standalone web..."
+  (
+    cd web
+    INTERNAL_API_URL="http://127.0.0.1:3000" npm run build
+  )
+fi
 
-# 3. Create deployment package
-echo "📦 Creating deployment package..."
-TMPDIR=$(mktemp -d)
-trap 'rm -rf "$TMPDIR"' EXIT
+DEPLOY_STAGE=$(mktemp -d)
+trap 'rm -rf "$DEPLOY_STAGE"' EXIT
+REMOTE_STAGE="/tmp/hackai-deploy-$$"
+if [ "$WEB_ONLY" = false ]; then
+  cp "target/$TARGET/release/hackai-server" "$DEPLOY_STAGE/"
+  cp "target/$TARGET/release/hackai-migrate" "$DEPLOY_STAGE/"
+fi
+if [ "$API_ONLY" = false ]; then
+  mkdir -p "$DEPLOY_STAGE/web/.next"
+  cp -R web/.next/standalone/. "$DEPLOY_STAGE/web/"
+  cp -R web/.next/static "$DEPLOY_STAGE/web/.next/"
+  if [ -d web/public ]; then cp -R web/public "$DEPLOY_STAGE/web/"; fi
+fi
 
-# Server binary
-cp target/release/hackai-server "$TMPDIR/"
+if [ "$WEB_ONLY" = false ]; then
+echo "Deploying API to $HOST:$API_DIR..."
+# Stage outside the live binary directory, then atomically replace the server
+# during restart. Writing over a running executable fails with ETXTBSY.
+run_remote "mkdir -p '$REMOTE_STAGE'"
+scp -O "$DEPLOY_STAGE/hackai-server" "$DEPLOY_STAGE/hackai-migrate" "$HOST:$REMOTE_STAGE/"
+fi
+if [ "$API_ONLY" = false ]; then
+  echo "Deploying web to $HOST:$WEB_DIR..."
+  COPYFILE_DISABLE=1 tar --no-xattrs -C "$DEPLOY_STAGE/web" -czf - . | \
+    run_remote "tar -xzf - -C '$WEB_DIR'"
+fi
 
-# Web build output
-cp -r web/.next "$TMPDIR/web"
-cp -r web/public "$TMPDIR/web"
-cp web/package.json web/package-lock.json "$TMPDIR/web/"
-
-# Config files
-cp docker-compose.yml "$TMPDIR/"
-cp .env.example "$TMPDIR/.env" 2>/dev/null || true
-
-# Systemd service files
-mkdir -p "$TMPDIR/systemd"
-cat > "$TMPDIR/systemd/hackai-server.service" <<'EOF'
-[Unit]
-Description=HackAI Server
-After=network.target postgresql.service
-Requires=postgresql.service
-
-[Service]
-Type=simple
-User=hackai
-WorkingDirectory=/opt/hackai
-Environment=DATABASE_URL=postgres://hackai:hackai@localhost:5432/hackai
-Environment=HC_AUTH_CLIENT_ID=${HC_AUTH_CLIENT_ID}
-Environment=HC_AUTH_CLIENT_SECRET=${HC_AUTH_CLIENT_SECRET}
-Environment=SESSION_SIGNING_KEY=${SESSION_SIGNING_KEY}
-Environment=FRONTEND_URL=https://hackai.crabby605.hackclub.app
-Environment=HACKAI_PUBLIC_URL=https://hackai.crabby605.hackclub.app
-ExecStart=/opt/hackai/hackai-server
-Restart=on-failure
-RestartSec=5
-StandardOutput=journal
-StandardError=journal
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-cat > "$TMPDIR/systemd/hackai-web.service" <<'EOF'
-[Unit]
-Description=HackAI Web (Next.js)
-After=network.target hackai-server.service
-Requires=hackai-server.service
-
-[Service]
-Type=simple
-User=hackai
-WorkingDirectory=/opt/hackai/web
-Environment=NODE_ENV=production
-Environment=NEXT_PUBLIC_API_URL=https://hackai.crabby605.hackclub.app
-ExecStart=/usr/bin/node server.js
-Restart=on-failure
-RestartSec=5
-StandardOutput=journal
-StandardError=journal
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-# 4. Sync to remote
-echo "📤 Syncing to $HOST:$DEPLOY_PATH..."
-rsync -avz --delete \
-  --exclude '.git' \
-  --exclude 'target/debug' \
-  --exclude 'node_modules' \
-  --exclude '.next/cache' \
-  "$TMPDIR/" "$HOST:$DEPLOY_PATH/"
-
-# 5. Run remote setup
-echo "🔧 Running remote setup..."
-ssh "$HOST" <<'REMOTE_EOF'
-set -euo pipefail
-
-cd /opt/hackai
-
-# Install web dependencies
-cd web && npm ci --production && cd ..
-
-# Setup systemd services
-sudo cp systemd/hackai-server.service /etc/systemd/system/
-sudo cp systemd/hackai-web.service /etc/systemd/system/
-sudo systemctl daemon-reload
-
-# Enable and restart services
-sudo systemctl enable hackai-server hackai-web
-sudo systemctl restart hackai-server
+if [ "$WEB_ONLY" = false ]; then
+run_remote 'set -euo pipefail
+cp /root/hackai/bin/hackai-server /root/hackai/bin/hackai-server.previous
+mv '"$REMOTE_STAGE"'/hackai-server /root/hackai/bin/hackai-server
+mv '"$REMOTE_STAGE"'/hackai-migrate /root/hackai/bin/hackai-migrate
+systemctl restart hackai-server
 sleep 3
-sudo systemctl restart hackai-web
+if ! curl -fsS http://127.0.0.1:3000/healthz >/dev/null; then
+  mv /root/hackai/bin/hackai-server.previous /root/hackai/bin/hackai-server
+  systemctl restart hackai-server
+  exit 1
+fi
+rm -f /root/hackai/bin/hackai-server.previous
+rm -rf '"$REMOTE_STAGE"'
+systemctl is-active --quiet hackai-server
+'
+fi
+if [ "$API_ONLY" = false ]; then
+  run_remote 'set -euo pipefail
+systemctl restart hackai-web
+systemctl is-active --quiet hackai-web
+curl --retry 10 --retry-connrefused --retry-delay 1 -fsS http://127.0.0.1:3001/health >/dev/null
+'
+fi
 
-# Check status
-sudo systemctl status hackai-server --no-pager
-sudo systemctl status hackai-web --no-pager
-REMOTE_EOF
-
-echo "✅ Deployment complete!"
-echo "   Server: https://hackai.crabby605.hackclub.app"
-echo "   API:    https://hackai.crabby605.hackclub.app/api/v1/health"
+echo "Deployment complete: https://hackai.crabby605.hackclub.app"

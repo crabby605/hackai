@@ -1,6 +1,8 @@
 import { buttonVariants } from "@/components/ui/button"
 import { cn } from "@/lib/utils"
+import { errorPageDb, rotatingErrorPage } from "@/app/lib/error-page-db"
 
 export default function NotFound() {
-  return <section className="state-card"><p className="eyebrow">404 · Lost in the build</p><h1>This route<br /><em>doesn’t exist.</em></h1><p>Nothing was changed and no tracking data was touched.</p><a className={cn(buttonVariants())} href="/">Back to HackAI <span>→</span></a></section>
+  const page = rotatingErrorPage(errorPageDb.notFound)
+  return <section className="state-card"><p className="eyebrow">{page.eyebrow}</p><h1>{page.title[0]}<br /><em>{page.title[1]}</em></h1><p>{page.description}</p><a className={cn(buttonVariants())} href="/">{page.action} <span>→</span></a></section>
 }

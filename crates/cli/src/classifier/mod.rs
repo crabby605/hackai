@@ -3,10 +3,12 @@
 //! This module intentionally returns only coarse signals. Callers must not
 //! persist the source prompt or include it in sync/annotation payloads.
 
+use regex::Regex;
 use serde::Serialize;
+use std::sync::OnceLock;
 
-/// Placeholder for demoted local ML model. Returns Unknown until/if a
-/// calibrated, signed model is reinstated (see target.md §4).
+/// Coarse output from the local structural model. It is never a judgement of
+/// authorship and is not uploaded as prompt text or used for PESDO/credit.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 #[allow(dead_code)] // Future ML model variants
@@ -18,8 +20,48 @@ pub enum ModelPrediction {
     High,
 }
 
-fn predict_from_default_path(_prompt: &str) -> ModelPrediction {
-    ModelPrediction::Unknown
+fn predict_from_default_path(prompt: &str) -> ModelPrediction {
+    // Tiny fixed linear model over non-content structural features. Keeping
+    // it local makes the hybrid classifier useful without retaining prompts;
+    // a future trained model can replace these coefficients behind this API.
+    let words = prompt.split_whitespace().count() as f64;
+    let anchors = [
+        "error", "expected", "file", "test", "because", "must", "when",
+    ]
+    .iter()
+    .filter(|token| prompt.to_lowercase().contains(**token))
+    .count() as f64;
+    let score = -1.0 + words.min(80.0) * 0.035 + anchors * 0.42;
+    if score > 2.0 {
+        ModelPrediction::High
+    } else if score > 0.4 {
+        ModelPrediction::Medium
+    } else {
+        ModelPrediction::Low
+    }
+}
+
+#[derive(Default)]
+struct RegexSignals {
+    one_shot: bool,
+    agent_targeted_urgency: bool,
+}
+
+fn regex_signals(prompt: &str) -> RegexSignals {
+    static ONE_SHOT: OnceLock<Option<Regex>> = OnceLock::new();
+    static URGENT_AGENT: OnceLock<Option<Regex>> = OnceLock::new();
+    let one_shot = ONE_SHOT
+        .get_or_init(|| Regex::new(r"(?i)\b(one[ -]?shot|single pass|just do it|do everything|from scratch|end to end)\b").ok())
+        .as_ref()
+        .is_some_and(|regex| regex.is_match(prompt));
+    let agent_targeted_urgency = URGENT_AGENT
+        .get_or_init(|| Regex::new(r"(?i)\b(codex|claude|cursor|aider|agent)\b.*\b(stop|listen|now|enough|immediately)\b").ok())
+        .as_ref()
+        .is_some_and(|regex| regex.is_match(prompt));
+    RegexSignals {
+        one_shot,
+        agent_targeted_urgency,
+    }
 }
 
 /// A local estimate that the prompt delegates most task framing and decisions
@@ -63,6 +105,8 @@ pub struct PromptSignals {
 /// never inputs to PESDO, annotations, or credit calculations.
 pub fn classify_prompt(prompt: &str) -> PromptSignals {
     let normalized = prompt.to_lowercase();
+    let regex = regex_signals(prompt);
+    let model_prediction = predict_from_default_path(prompt);
     let alphabetic: Vec<char> = prompt
         .chars()
         .filter(|character| character.is_alphabetic())
@@ -124,7 +168,11 @@ pub fn classify_prompt(prompt: &str) -> PromptSignals {
         ]
         .iter()
         .any(|term| normalized.contains(term)),
-        one_shot: has_implicit_one_shot_request(&normalized)
+        // Hybrid decision: transparent regex rules catch known high-precision
+        // forms while the structural model contributes a conservative prior.
+        one_shot: regex.one_shot
+            || (has_implicit_one_shot_request(&normalized)
+                && !matches!(model_prediction, ModelPrediction::High))
             || [
                 "one shot",
                 "one-shot",
@@ -148,11 +196,13 @@ pub fn classify_prompt(prompt: &str) -> PromptSignals {
         // Require an explicit target plus a strong signal, so ordinary
         // imperative instructions are not labelled as yelling.
         yelling_at_agents: has_agent_target
-            && (all_caps || (emphatic_command && repeated_exclamation)),
+            && (all_caps
+                || regex.agent_targeted_urgency
+                || (emphatic_command && repeated_exclamation)),
         attempted_score_manipulation,
         do_not_comply: attempted_score_manipulation,
         used_prior_turn_context: false,
-        ai_coding_prompt_proficiency: predict_from_default_path(prompt),
+        ai_coding_prompt_proficiency: model_prediction,
         slop_likelihood: estimate_slop_likelihood(&normalized),
     }
 }
@@ -382,6 +432,17 @@ mod tests {
 
         let result = classify_prompt("Please fix this now!!");
         assert!(!result.yelling_at_agents);
+    }
+
+    #[test]
+    fn regex_and_structural_model_form_the_local_hybrid() {
+        let result = classify_prompt("Codex, listen now: build this from scratch");
+        assert!(result.one_shot);
+        assert!(result.yelling_at_agents);
+        assert_ne!(
+            result.ai_coding_prompt_proficiency,
+            super::ModelPrediction::Unknown
+        );
     }
 
     #[test]

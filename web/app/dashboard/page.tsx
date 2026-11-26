@@ -3,13 +3,14 @@ import { Badge } from "@/components/ui/badge"
 import { buttonVariants } from "@/components/ui/button"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { CoachSummary, type CoachSummaryData } from "@/components/coach-summary"
+import { ActivityOverviewChart } from "@/components/activity-overview-chart"
 import { cn } from "@/lib/utils"
 import Link from "next/link"
 
 interface Me { display_name: string | null; username: string; profile_public: boolean }
 interface DashboardStats { human_ratio_permille: number; agent_ratio_permille: number; struggle_episodes: number; mean_pesdo: number | null }
-interface Episode { id: string; started_at: string; human_seconds: number; agent_seconds: number; attempts: number; resolved: boolean; credited_seconds: number }
-interface Project { id: number; name: string; total_seconds: number; human_seconds: number; agent_seconds: number; last_active: string | null }
+interface Episode { id: string; started_at: string; human_seconds: number; agent_seconds: number; attempts: number; resolved: boolean; credited_seconds: number; pesdo_score_permille: number | null }
+interface Project { id: number; name: string; total_seconds: number; human_seconds: number; agent_seconds: number; last_active: string | null; avg_pesdo_score_permille?: number | null }
 interface DashboardInsights { most_used_harness: string | null; primary_language: string | null; most_active_day: string | null; pesdo_score_permille: number | null }
 
 // Optional during server rollout. Existing episode/project data remains useful
@@ -49,8 +50,13 @@ function percentage(value: number, total: number): number {
   return total > 0 ? Math.round((value / total) * 100) : 0
 }
 
+function chartLabel(value: string): string {
+  const date = new Date(value)
+  return Number.isNaN(date.getTime()) ? "Session" : date.toLocaleDateString(undefined, { month: "short", day: "numeric" })
+}
+
 export default async function DashboardPage() {
-  const [me, stats, episodes, projects, insights, coach, snapshot] = await Promise.all([
+  let [me, stats, episodes, projects, insights, coach, snapshot] = await Promise.all([
     getJson<Me>("/api/v1/me"),
     getJson<DashboardStats>("/api/v1/dashboard/stats"),
     getJson<Episode[]>("/api/v1/episodes"),
@@ -59,6 +65,29 @@ export default async function DashboardPage() {
     getJson<CoachSummaryData>("/api/v1/coach"),
     getJson<DashboardSnapshot>("/api/v1/dashboard/snapshot"),
   ])
+
+  // A local UI preview should be inspectable without also running Postgres and
+  // the Rust API. These values never run in a production build.
+  if (process.env.NODE_ENV === "development" && (!me || !stats)) {
+    me = { display_name: "Vihaan", username: "vihaan", profile_public: false }
+    stats = { human_ratio_permille: 640, agent_ratio_permille: 360, struggle_episodes: 3, mean_pesdo: 782 }
+    episodes = [
+      { id: "preview-1", started_at: new Date().toISOString(), human_seconds: 1260, agent_seconds: 720, attempts: 2, resolved: true, credited_seconds: 1980, pesdo_score_permille: 824 },
+      { id: "preview-2", started_at: new Date(Date.now() - 86_400_000).toISOString(), human_seconds: 840, agent_seconds: 960, attempts: 3, resolved: true, credited_seconds: 1800, pesdo_score_permille: 771 },
+      { id: "preview-3", started_at: new Date(Date.now() - 3 * 86_400_000).toISOString(), human_seconds: 1800, agent_seconds: 1080, attempts: 2, resolved: false, credited_seconds: 2880, pesdo_score_permille: 694 },
+      { id: "preview-4", started_at: new Date(Date.now() - 5 * 86_400_000).toISOString(), human_seconds: 1260, agent_seconds: 1380, attempts: 4, resolved: true, credited_seconds: 2640, pesdo_score_permille: 736 },
+      { id: "preview-5", started_at: new Date(Date.now() - 7 * 86_400_000).toISOString(), human_seconds: 2040, agent_seconds: 900, attempts: 1, resolved: true, credited_seconds: 2940, pesdo_score_permille: 748 },
+    ]
+    projects = [
+      { id: 1, name: "ironbind", total_seconds: 14_460, human_seconds: 8_640, agent_seconds: 5_820, last_active: new Date().toISOString(), avg_pesdo_score_permille: 782 },
+      { id: 2, name: "hackai", total_seconds: 9_240, human_seconds: 5_940, agent_seconds: 3_300, last_active: new Date(Date.now() - 86_400_000).toISOString(), avg_pesdo_score_permille: 814 },
+      { id: 3, name: "relay", total_seconds: 7_380, human_seconds: 4_560, agent_seconds: 2_820, last_active: new Date(Date.now() - 2 * 86_400_000).toISOString(), avg_pesdo_score_permille: 739 },
+      { id: 4, name: "canvas-kit", total_seconds: 5_220, human_seconds: 3_180, agent_seconds: 2_040, last_active: new Date(Date.now() - 4 * 86_400_000).toISOString(), avg_pesdo_score_permille: 761 },
+      { id: 5, name: "papertrail", total_seconds: 3_900, human_seconds: 2_160, agent_seconds: 1_740, last_active: new Date(Date.now() - 7 * 86_400_000).toISOString(), avg_pesdo_score_permille: 698 },
+    ]
+    insights = { most_used_harness: "Codex", primary_language: "TypeScript", most_active_day: "Today", pesdo_score_permille: 782 }
+    snapshot = { last_sync_at: new Date().toISOString(), sync_status: "synced", total_human_seconds: 9_480, total_agent_seconds: 5_520, input_tokens: 128_400, output_tokens: 31_200, feedback: [{ recorded_at: new Date().toISOString(), feedback: "You supplied concrete constraints and checked outcomes after each meaningful iteration." }] }
+  }
 
   if (!me || !stats) return <section className="state-card"><p className="eyebrow">Overview</p><h1>We couldn’t load your workspace.</h1><p>Your information remains protected. Please try again in a moment.</p><a className={cn(buttonVariants({ variant: "outline" }))} href="/dashboard">Refresh overview</a></section>
 
@@ -73,6 +102,7 @@ export default async function DashboardPage() {
   const humanPercent = snapshot?.total_human_seconds != null ? percentage(humanSeconds, activeSeconds) : Math.round(stats.human_ratio_permille / 10)
   const agentPercent = snapshot?.total_agent_seconds != null ? percentage(agentSeconds, activeSeconds) : Math.round(stats.agent_ratio_permille / 10)
   const feedback = (snapshot?.feedback ?? []).slice(0, 3)
+  const activityChart = [...allEpisodes].slice(0, 12).reverse().map((episode) => ({ label: chartLabel(episode.started_at), human: Math.round(episode.human_seconds / 60), agent: Math.round(episode.agent_seconds / 60), pesdo: episode.pesdo_score_permille, recordedAt: formatDate(episode.started_at) }))
   const name = me.display_name ?? me.username
   const syncLabel = snapshot?.sync_status === "failed" ? "Last background sync needs attention" : snapshot?.last_sync_at ? `Synced ${formatDate(snapshot.last_sync_at)}` : "Waiting for first background sync"
 
@@ -86,8 +116,10 @@ export default async function DashboardPage() {
       <Card><CardHeader><CardTitle>Credited build time</CardTitle></CardHeader><CardContent><strong>{formatDuration(totalCreditedSeconds)}</strong><span>{allProjects.length} tracked project{allProjects.length === 1 ? "" : "s"}</span></CardContent></Card>
       <Card><CardHeader><CardTitle>Human / AI activity</CardTitle></CardHeader><CardContent><strong>{humanPercent}% <small>human</small></strong><span>{formatDuration(humanSeconds)} human · {formatDuration(agentSeconds)} agent</span></CardContent></Card>
       <Card><CardHeader><CardTitle>Model tokens</CardTitle></CardHeader><CardContent><strong>{formatTokens((snapshot?.input_tokens ?? 0) + (snapshot?.output_tokens ?? 0))}</strong><span>{snapshot ? `${formatTokens(snapshot.input_tokens)} in · ${formatTokens(snapshot.output_tokens)} out` : "Available after automatic sync"}</span></CardContent></Card>
-      <Card><CardHeader><CardTitle>Current PESDO</CardTitle></CardHeader><CardContent><strong>{insights?.pesdo_score_permille ?? stats.mean_pesdo ?? "—"}<small> / 1000</small></strong><span>{stats.mean_pesdo != null ? "Derived from recent episodes" : "No scored episodes yet"}</span></CardContent></Card>
+      <Card><CardHeader><CardTitle>Average PESDO score</CardTitle></CardHeader><CardContent><strong>{stats.mean_pesdo ?? "—"}<small> / 1000</small></strong><span>{stats.mean_pesdo != null ? "Average across your scored work" : "No scored episodes yet"}</span></CardContent></Card>
     </div>
+
+    <Card className="overview-chart"><CardHeader><div><CardTitle>Activity and score trend</CardTitle><p>Active collaboration minutes with PESDO score per recorded session.</p></div></CardHeader><CardContent>{activityChart.length ? <ActivityOverviewChart data={activityChart} /> : <p className="empty">Record a session to start your activity chart.</p>}</CardContent></Card>
 
     <div className="dashboard-grid">
       <section className="dashboard-section" aria-labelledby="recent-heading">
@@ -101,15 +133,9 @@ export default async function DashboardPage() {
       </aside>
     </div>
 
-    <section className="dashboard-section score-section" aria-labelledby="score-heading">
-      <div className="section-heading"><div><h2 id="score-heading">How the score is built</h2><p>PESDO combines presence, evidence, information gain, and deliberation. Submission eligibility stays separate.</p></div></div>
-      <div className="score-bars"><div><span>Presence</span><b>{humanPercent}%</b><i><em style={{ width: `${humanPercent}%` }} /></i></div><div><span>Evidence</span><b>{allEpisodes.length} episodes</b><i><em style={{ width: `${Math.min(100, allEpisodes.length * 10)}%` }} /></i></div><div><span>Iteration</span><b>{stats.struggle_episodes} extra-pass</b><i><em style={{ width: `${Math.min(100, stats.struggle_episodes * 20)}%` }} /></i></div></div>
-      <p className="panel-note">These are derived signals, not judgments about you. The raw conversation remains local.</p>
-    </section>
-
     <section className="dashboard-section projects-section" aria-labelledby="projects-heading">
       <div className="section-heading"><div><h2 id="projects-heading">Tracked projects</h2><p>Open a project for its daily rollups, time split, and recorded episodes.</p></div><a href="/projects">All projects</a></div>
-      {allProjects.length === 0 ? <p className="empty">Your projects will appear here after the tracker syncs activity.</p> : <div className="dashboard-project-list">{allProjects.slice(0, 4).map((project) => <Link href={`/projects/${project.id}`} key={project.id}><span><b>{project.name}</b><small>{project.last_active ? `Last active ${formatDate(project.last_active)}` : "No activity timestamp yet"}</small></span><strong>{formatDuration(project.total_seconds)}</strong></Link>)}</div>}
+      {allProjects.length === 0 ? <p className="empty">Your projects will appear here after the tracker syncs activity.</p> : <div className="dashboard-project-list">{allProjects.slice(0, 4).map((project) => <Link href={`/projects/${project.id}`} key={project.id}><span><b>{project.name}</b><small>{project.last_active ? `Last active ${formatDate(project.last_active)}` : "No activity timestamp yet"}</small></span><strong>{project.avg_pesdo_score_permille == null ? formatDuration(project.total_seconds) : `PESDO ${project.avg_pesdo_score_permille}`}</strong></Link>)}</div>}
     </section>
 
     {feedback.length > 0 && <section className="dashboard-section feedback-section" aria-labelledby="feedback-heading"><div className="section-heading"><div><h2 id="feedback-heading">Agent feedback</h2><p>Short feedback captured by the tracker after every tenth turn.</p></div></div><div className="feedback-list">{feedback.map((item, index) => <article key={`${item.recorded_at}-${index}`}><time>{formatDate(item.recorded_at)}</time><p>{item.feedback}</p></article>)}</div></section>}

@@ -1,13 +1,15 @@
 import { buttonVariants } from "@/components/ui/button"
 import { cn } from "@/lib/utils"
+import { errorPageDb, rotatingErrorPage } from "@/app/lib/error-page-db"
 
 export default function UnauthorizedPage() {
+  const page = rotatingErrorPage(errorPageDb.unauthorized)
   return (
     <section className="state-card">
-      <p className="eyebrow">401 · Unauthorized</p>
-      <h1>Authentication<br /><em>required.</em></h1>
-      <p>You need to sign in with your Hack Club account to access this page.</p>
-      <a className={cn(buttonVariants())} href="/login">Sign in with Hack Club <span>→</span></a>
+      <p className="eyebrow">{page.eyebrow}</p>
+      <h1>{page.title[0]}<br /><em>{page.title[1]}</em></h1>
+      <p>{page.description}</p>
+      <a className={cn(buttonVariants())} href="/login">{page.action} <span>→</span></a>
     </section>
   )
 }

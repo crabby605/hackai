@@ -12,7 +12,11 @@ use std::path::Path;
 /// Hard input bounds prevent a hostile or corrupted transcript from consuming
 /// unbounded memory before features are extracted.
 pub const MAX_JSONL_RECORDS: usize = 10_000;
-pub const MAX_JSONL_LINE_BYTES: usize = 1_048_576;
+// Codex can legitimately emit a single large JSONL record when a tool has a
+// sizeable result. Eight MiB remains a firm hostile-input bound while
+// accepting current real-world rollouts (the largest observed one was 4.8
+// MiB).
+pub const MAX_JSONL_LINE_BYTES: usize = 8 * 1_024 * 1_024;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ParseError {
@@ -916,16 +920,46 @@ pub fn parse_opencode_sqlite<P: Clone, I: Clone>(
     rel_path: Option<P>,
     session: String,
 ) -> Result<Vec<NormalizedEvent<P, I>>, ParseError> {
+    parse_opencode_sqlite_scoped(database, None, project, rel_path, session)
+}
+
+/// Read only OpenCode messages belonging to a verified session directory.
+/// Current OpenCode SQLite releases expose `session.directory` and
+/// `message.session_id`; keeping this query scoped prevents a global database
+/// from leaking another project into a tracked directory.
+pub fn parse_opencode_sqlite_for_directory<P: Clone, I: Clone>(
+    database: &Path,
+    directory: &Path,
+    project: I,
+    rel_path: Option<P>,
+    session: String,
+) -> Result<Vec<NormalizedEvent<P, I>>, ParseError> {
+    let directory = directory.to_string_lossy().into_owned();
+    parse_opencode_sqlite_scoped(database, Some(&directory), project, rel_path, session)
+}
+
+fn parse_opencode_sqlite_scoped<P: Clone, I: Clone>(
+    database: &Path,
+    directory: Option<&str>,
+    project: I,
+    rel_path: Option<P>,
+    session: String,
+) -> Result<Vec<NormalizedEvent<P, I>>, ParseError> {
     let connection = rusqlite::Connection::open_with_flags(
         database,
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
     )
     .map_err(|error| ParseError::OpenCodeDatabase(error.to_string()))?;
+    let query = if directory.is_some() {
+        "SELECT m.time_created, m.data FROM message m JOIN session s ON s.id = m.session_id WHERE s.directory = ?1 ORDER BY m.time_created"
+    } else {
+        "SELECT time_created, data FROM message ORDER BY time_created"
+    };
     let mut statement = connection
-        .prepare("SELECT time_created, data FROM message ORDER BY time_created")
+        .prepare(query)
         .map_err(|error| ParseError::OpenCodeDatabase(error.to_string()))?;
     let rows = statement
-        .query_map([], |row| {
+        .query_map(rusqlite::params_from_iter(directory), |row| {
             Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
         })
         .map_err(|error| ParseError::OpenCodeDatabase(error.to_string()))?;

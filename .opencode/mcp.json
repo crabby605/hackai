@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "hackai": {
+      "args": [
+        "mcp"
+      ],
+      "command": "hackai"
+    }
+  }
+}

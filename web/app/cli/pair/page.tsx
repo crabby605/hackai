@@ -2,8 +2,7 @@
 
 import { useState } from "react"
 import { useSearchParams } from "next/navigation"
-import { buttonVariants } from "@/components/ui/button"
-import { cn } from "@/lib/utils"
+import { Button } from "@/components/ui/button"
 
 export default function CliPairPage() {
   const params = useSearchParams()
@@ -37,7 +36,7 @@ export default function CliPairPage() {
       <h1>Approve this<br /><em>device?</em></h1>
       <p>Only continue if you started <code>hackai login</code> on this device. Approving links its installation token to your account.</p>
       {code ? <p>Device code: <code>{code}</code></p> : <p>Missing device code. Run <code>hackai login</code> again.</p>}
-      <button className={cn(buttonVariants({ size: "lg" }))} disabled={!code} onClick={approve}>Approve device</button>
+      <Button size="lg" disabled={!code} onClick={approve}>Approve device</Button>
     </>}
     {status === "approving" && <><h1>Approving this<br /><em>device.</em></h1><p>One moment—your local CLI is being linked to this account.</p></>}
     {status === "approved" && <><h1>Device approved.</h1><p>Return to your terminal. HackAI can now sync using this installation’s token.</p></>}

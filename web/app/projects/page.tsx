@@ -1,7 +1,8 @@
 import { getJson } from "@/app/lib/api"
-import { buttonVariants } from "@/components/ui/button"
+import { Button } from "@/components/ui/button"
+import { Badge } from "@/components/ui/badge"
 import { Card, CardContent } from "@/components/ui/card"
-import { cn } from "@/lib/utils"
+import { NativeSelect, NativeSelectOption } from "@/components/ui/native-select"
 import Link from "next/link"
 
 interface ProjectSummary {
@@ -11,6 +12,7 @@ interface ProjectSummary {
   human_seconds: number
   agent_seconds: number
   last_active: string | null
+  avg_pesdo_score_permille?: number | null
 }
 
 function formatDate(value: string | null): string {
@@ -28,8 +30,19 @@ function formatDuration(seconds: number): string {
 
 export default async function ProjectsPage({ searchParams }: { searchParams: Promise<{ sort?: string }> }) {
   const { sort = "time_desc" } = await searchParams
-  const viewer = await getJson<{ username: string }>("/api/v1/me")
-  const projects = await getJson<ProjectSummary[]>(`/api/v1/projects?sort=${encodeURIComponent(sort)}`)
+  let viewer = await getJson<{ username: string }>("/api/v1/me")
+  let projects = await getJson<ProjectSummary[]>(`/api/v1/projects?sort=${encodeURIComponent(sort)}`)
+  if (process.env.NODE_ENV === "development" && (!viewer || !projects)) {
+    viewer = { username: "vihaan" }
+    projects = [
+      { id: 1, name: "ironbind", total_seconds: 51_780, human_seconds: 31_920, agent_seconds: 19_860, last_active: new Date().toISOString(), avg_pesdo_score_permille: 782 },
+      { id: 2, name: "hackai", total_seconds: 42_420, human_seconds: 24_600, agent_seconds: 17_820, last_active: new Date(Date.now() - 86_400_000).toISOString(), avg_pesdo_score_permille: 814 },
+      { id: 3, name: "relay", total_seconds: 28_560, human_seconds: 17_820, agent_seconds: 10_740, last_active: new Date(Date.now() - 2 * 86_400_000).toISOString(), avg_pesdo_score_permille: 739 },
+      { id: 4, name: "canvas-kit", total_seconds: 18_900, human_seconds: 12_180, agent_seconds: 6_720, last_active: new Date(Date.now() - 4 * 86_400_000).toISOString(), avg_pesdo_score_permille: 761 },
+      { id: 5, name: "papertrail", total_seconds: 12_240, human_seconds: 6_660, agent_seconds: 5_580, last_active: new Date(Date.now() - 7 * 86_400_000).toISOString(), avg_pesdo_score_permille: 698 },
+      { id: 6, name: "weatherly", total_seconds: 7_320, human_seconds: 4_920, agent_seconds: 2_400, last_active: new Date(Date.now() - 10 * 86_400_000).toISOString(), avg_pesdo_score_permille: 755 },
+    ]
+  }
   if (!viewer) {
     return (
       <section className="state-card">
@@ -37,9 +50,7 @@ export default async function ProjectsPage({ searchParams }: { searchParams: Pro
         <h1 style={{ fontSize: "1.75rem", letterSpacing: "-0.04em", margin: "0 0 1rem" }}>
           Sign in to see your projects.
         </h1>
-        <a className={cn(buttonVariants({ size: "lg" }))} href="/login">
-          Sign in <span>→</span>
-        </a>
+        <Button size="lg" render={<a href="/login" />}>Sign in <span>→</span></Button>
       </section>
     )
   }
@@ -50,9 +61,7 @@ export default async function ProjectsPage({ searchParams }: { searchParams: Pro
         <p className="eyebrow">Projects unavailable</p>
         <h1>Your data is safe.</h1>
         <p>Your project summary is temporarily unavailable. Please try again in a moment.</p>
-        <a className={cn(buttonVariants({ variant: "outline" }))} href="/projects">
-          Try again
-        </a>
+        <Button variant="outline" render={<a href="/projects" />}>Try again</Button>
       </section>
     )
   }
@@ -72,15 +81,15 @@ export default async function ProjectsPage({ searchParams }: { searchParams: Pro
         </span>
         <form action="/projects" method="get" className="flex items-center gap-2">
           <label htmlFor="project-sort" className="text-sm text-muted-foreground">Sort</label>
-          <select id="project-sort" name="sort" defaultValue={sort} className="border rounded px-2 py-1 text-sm bg-background">
-            <option value="time_desc">Most time (high → low)</option>
-            <option value="time_asc">Least time (low → high)</option>
-            <option value="last_worked_desc">Last worked (newest first)</option>
-            <option value="last_worked_asc">Last worked (oldest first)</option>
-            <option value="name_asc">Name (A–Z)</option>
-            <option value="name_desc">Name (Z–A)</option>
-          </select>
-          <button type="submit" className={cn(buttonVariants({ variant: "outline", size: "sm" }))}>Apply</button>
+          <NativeSelect id="project-sort" name="sort" defaultValue={sort} size="sm">
+            <NativeSelectOption value="time_desc">Most time (high → low)</NativeSelectOption>
+            <NativeSelectOption value="time_asc">Least time (low → high)</NativeSelectOption>
+            <NativeSelectOption value="last_worked_desc">Last worked (newest first)</NativeSelectOption>
+            <NativeSelectOption value="last_worked_asc">Last worked (oldest first)</NativeSelectOption>
+            <NativeSelectOption value="name_asc">Name (A–Z)</NativeSelectOption>
+            <NativeSelectOption value="name_desc">Name (Z–A)</NativeSelectOption>
+          </NativeSelect>
+          <Button type="submit" variant="outline" size="sm">Apply</Button>
         </form>
       </div>
 
@@ -99,7 +108,8 @@ export default async function ProjectsPage({ searchParams }: { searchParams: Pro
                     <div className="text-xs text-muted-foreground">Last active: {formatDate(p.last_active)}</div>
                   </div>
                   <div className="text-right">
-                    <div className="font-semibold">{formatDuration(p.total_seconds)}</div>
+                    {p.avg_pesdo_score_permille != null && <Badge variant="outline">PESDO {p.avg_pesdo_score_permille}</Badge>}
+                    <div className="mt-1 font-semibold">{formatDuration(p.total_seconds)}</div>
                     <div className="text-xs text-muted-foreground">{humanPct.toFixed(0)}% human / {agentPct.toFixed(0)}% agent</div>
                   </div>
                 </CardContent>

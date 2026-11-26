@@ -26,6 +26,7 @@ All authenticated endpoints require a session cookie (HttpOnly, SameSite=Lax), s
 | GET | `/callback`, `/auth/callback` | Public | OIDC callback, sets session cookie |
 | GET | `/healthz` | Public | Health check (plain text "ok") |
 | GET | `/api/v1/health` | Public | Detailed health status (version, components, uptime) |
+| GET | `/api/v2/teapot` | Public | Returns HTTP 418, for tea-related diagnostics |
 
 ### User
 
@@ -71,6 +72,7 @@ All authenticated endpoints require a session cookie (HttpOnly, SameSite=Lax), s
 | Method | Path | Auth | Description |
 |--------|------|------|-------------|
 | GET | `/api/v1/episodes` | Session | List recent episodes (50) |
+| GET | `/api/v1/episodes/{id}/improvement` | Session owner | Per-turn self-improvement narrative and session PESDO delta; never exposes raw prompts or internal user labels |
 | GET | `/api/v1/struggles` | Session | Struggle days with human/agent/struggle breakdown |
 
 ### Leaderboard
@@ -92,6 +94,7 @@ All authenticated endpoints require a session cookie (HttpOnly, SameSite=Lax), s
 | GET | `/api/v1/admin/insights` | Admin | System-wide stats |
 | GET | `/api/v1/admin/users` | Admin | List all users (with query: `q`, `limit`) |
 | GET | `/api/v1/admin/users/{id}` | Admin | User detail (projects, gated episodes, commit claims/GitHub state, installations, hardware hashes) |
+| GET | `/api/v1/admin/users/{id}/understanding` | Admin | Detailed derived session classifications and aggregate staff-only user understanding; never includes raw prompts, replies, code, paths, or tool output |
 | GET | `/api/v1/admin/users/{id}/projects` | Admin | User's projects with rollup stats |
 | GET | `/api/v1/admin/activity` | Admin | Recent activity feed (query: `limit`) |
 | POST | `/api/v1/admin/users/{id}/ban` | Admin | Ban user (body: `{until?}`) |
@@ -114,8 +117,10 @@ All authenticated endpoints require a session cookie (HttpOnly, SameSite=Lax), s
 
 | Method | Path | Auth | Description |
 |--------|------|------|-------------|
-| POST | `/api/v1/sync` | Session or Bearer token | Push episodes, annotations, checkpoints, and optional SHA-256 hardware digests (legacy alias) |
-| POST | `/api/v1/upload` | Session or Bearer token | Canonical upload endpoint for CLI sync |
+| POST | `/api/v2/upload` | Session or Bearer token | Canonical CLI sync endpoint, including bounded derived session-turn traces |
+| POST | `/api/v2/upload/bulk` | Session or Bearer token | Up to 20 independently idempotent sync batches; returns ordered per-batch results |
+| POST | `/api/v1/sync` | Session or Bearer token | Backward-compatible legacy alias; returns `Deprecation`, `Warning`, and successor-version `Link` headers |
+| POST | `/api/v1/upload` | Session or Bearer token | Backward-compatible legacy upload; returns `Deprecation`, `Warning`, and successor-version `Link` headers |
 | POST | `/api/v1/evidence-bundles` | Session or Bearer token | Opt-in redacted event-level evidence bundle; raw prompt text, code, paths, and tool output are rejected |
 | GET | `/api/v1/evidence-bundles` | Session or Bearer token | Caller’s redacted evidence-bundle provenance summaries |
 | GET | `/api/v1/evidence-bundles/{bundle_id}` | Session or Bearer token | Caller’s derived event records and provenance |

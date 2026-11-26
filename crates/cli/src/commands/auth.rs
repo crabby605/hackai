@@ -17,6 +17,7 @@ pub fn cmd_login(token: Option<String>, api_key: Option<String>, _device: bool) 
             ));
         }
         write_stored_token(&r, token)?;
+        state::mark_server_upload_authorized(&r)?;
         println!("API token stored in system keyring. Run `hackai sync` to sync.");
         return Ok(());
     }
@@ -127,6 +128,7 @@ pub fn cmd_login(token: Option<String>, api_key: Option<String>, _device: bool) 
                     .and_then(|v| v.as_str())
                     .ok_or_else(|| io::Error::other("pairing response missing token"))?;
                 write_stored_token(&r, token)?;
+                state::mark_server_upload_authorized(&r)?;
                 println!("\n✓ Authorized! API token stored in system keyring.");
                 println!("Run `hackai sync` to sync your data.");
                 return Ok(());

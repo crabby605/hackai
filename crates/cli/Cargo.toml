@@ -23,5 +23,9 @@ uuid = { version = "1.8", features = ["serde", "v4"] }
 tokio = { version = "1.38", features = ["rt", "macros"] }
 sha2 = "0.10"
 rusqlite = { version = "0.43", default-features = false, features = ["bundled"] }
+ratatui = "0.29"
+crossterm = "0.28"
+# Apache-2.0 OR MIT; used locally for bounded structural prompt rules.
+regex = "1.11"
 [lints]
 workspace = true

@@ -1,5 +1,8 @@
 #![forbid(unsafe_code)]
 
+// Keep Cargo's dependency graph aware of the newest embedded SQLx migration.
+const _: &str = include_str!("../../migrations/0035_shadow_bans.sql");
+
 use sqlx::postgres::PgPoolOptions;
 
 #[tokio::main]

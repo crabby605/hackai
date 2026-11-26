@@ -3,6 +3,10 @@ import { NextRequest, NextResponse } from "next/server"
 const protectedPaths = ["/dashboard", "/projects", "/struggles", "/evidence", "/settings", "/admin", "/cli/pair"]
 
 export function middleware(request: NextRequest) {
+  const isLocalPreview = process.env.NODE_ENV === "development"
+    && (request.nextUrl.hostname === "127.0.0.1" || request.nextUrl.hostname === "localhost")
+  if (isLocalPreview) return NextResponse.next()
+
   const needsSession = protectedPaths.some(
     (path) => request.nextUrl.pathname === path || request.nextUrl.pathname.startsWith(`${path}/`),
   )

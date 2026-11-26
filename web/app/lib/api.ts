@@ -63,13 +63,18 @@ async function fetchApi<T>(path: string): Promise<T | null> {
   } catch {
     // headers() may throw in non-request contexts
   }
-  const res = await fetch(`${API_BASE}${path}`, {
-    headers: reqHeaders,
-    cache: "no-store",
-  })
-
-  if (!res.ok) return null
-  return res.json() as Promise<T>
+  try {
+    const res = await fetch(`${API_BASE}${path}`, {
+      headers: reqHeaders,
+      cache: "no-store",
+    })
+    if (!res.ok) return null
+    return res.json() as Promise<T>
+  } catch {
+    // A local UI preview may deliberately run without the Rust API. Pages use
+    // null to render their existing unavailable/empty state rather than crash.
+    return null
+  }
 }
 
 export async function getJson<T>(path: string): Promise<T | null> {

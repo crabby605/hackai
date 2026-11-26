@@ -3,7 +3,8 @@ import { cookies } from "next/headers"
 import { getJson } from "@/app/lib/api"
 import { cn } from "@/lib/utils";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
-import { TooltipProvider } from "@/components/ui/tooltip";
+import { WorkspaceShell } from "@/components/workspace-shell";
+import { WorkspaceNavLink } from "@/components/workspace-nav-link";
 import {
   Sidebar,
   SidebarContent,
@@ -12,11 +13,9 @@ import {
   SidebarGroupContent,
   SidebarGroupLabel,
   SidebarHeader,
-  SidebarInset,
   SidebarMenu,
   SidebarMenuButton,
   SidebarMenuItem,
-  SidebarProvider,
   SidebarSeparator,
 } from "@/components/ui/sidebar";
 import { LayoutDashboard, BarChart3, CircleDot, FileCheck2, FolderGit2, LogOut, Settings, ShieldCheck } from "lucide-react";
@@ -37,17 +36,22 @@ const nav: Array<[string, string, LucideIcon]> = [
 ]
 
 export default async function RootLayout({ children }: { children: React.ReactNode }) {
-  const viewer = await getJson<Viewer>("/api/v1/me")
+  let viewer = await getJson<Viewer>("/api/v1/me")
   const cookieStore = await cookies()
   // Production HTTPS uses the __Host cookie; local HTTP uses this fallback.
   const cookie = cookieStore.get("__Host-hackai_session")?.value ?? cookieStore.get("hackai_session")?.value
+  // The standalone local UI preview runs without the Rust API. Keep its
+  // workspace shell visible so routes can be reviewed in their real chrome.
+  if (process.env.NODE_ENV === "development" && !viewer) {
+    viewer = { display_name: "Vihaan", username: "vihaan", email: null, country_code: "IN", avatar_url: null, is_admin: true }
+  }
   const name = viewer?.display_name ?? viewer?.username
 
   // Public marketing and auth pages should not inherit the workspace chrome.
   // The sidebar is only meaningful once a session exists.
   // A stale/invalid cookie must not expose workspace navigation on public or
   // auth pages. Only a verified API viewer gets the sidebar.
-  if (!cookie || !viewer) {
+  if ((!cookie || !viewer) && process.env.NODE_ENV !== "development") {
     return (
       <html lang="en" className={cn("dark font-sans")}>
         <body className="public-shell">{children}</body>
@@ -58,8 +62,7 @@ export default async function RootLayout({ children }: { children: React.ReactNo
   return (
     <html lang="en" className={cn("dark font-sans")}>
       <body>
-        <TooltipProvider>
-        <SidebarProvider>
+        <WorkspaceShell hasSession={Boolean(cookie && viewer)} sidebar={
           <Sidebar collapsible="icon">
             <SidebarHeader>
             {name ? (
@@ -88,25 +91,23 @@ export default async function RootLayout({ children }: { children: React.ReactNo
                 <SidebarGroupLabel>Workspace</SidebarGroupLabel>
                 <SidebarGroupContent>
                   <SidebarMenu>
-                    {nav.map(([label, href, Icon]) => <SidebarMenuItem key={href}><SidebarMenuButton render={<a href={href} />} tooltip={label}><Icon /><span>{label}</span></SidebarMenuButton></SidebarMenuItem>)}
+                    {nav.map(([label, href, Icon]) => <SidebarMenuItem key={href}><WorkspaceNavLink href={href} label={label}><Icon /><span>{label}</span></WorkspaceNavLink></SidebarMenuItem>)}
                   </SidebarMenu>
                 </SidebarGroupContent>
               </SidebarGroup>
               {name && <SidebarGroup>
                 <SidebarGroupLabel>Account</SidebarGroupLabel>
-                <SidebarGroupContent><SidebarMenu><SidebarMenuItem><SidebarMenuButton render={<a href="/settings" />} tooltip="Settings"><Settings /><span>Settings</span></SidebarMenuButton></SidebarMenuItem></SidebarMenu></SidebarGroupContent>
+                <SidebarGroupContent><SidebarMenu><SidebarMenuItem><WorkspaceNavLink href="/settings" label="Settings"><Settings /><span>Settings</span></WorkspaceNavLink></SidebarMenuItem></SidebarMenu></SidebarGroupContent>
               </SidebarGroup>}
             </SidebarContent>
             <SidebarFooter>
               <SidebarMenu>
-                {viewer?.is_admin && <SidebarMenuItem><SidebarMenuButton render={<a href="/admin" />} tooltip="Admin"><ShieldCheck /><span>Admin</span></SidebarMenuButton></SidebarMenuItem>}
+                {viewer?.is_admin && <SidebarMenuItem><WorkspaceNavLink href="/admin" label="Admin"><ShieldCheck /><span>Admin</span></WorkspaceNavLink></SidebarMenuItem>}
                 <SidebarMenuItem>{name ? <form action="/logout" method="post"><SidebarMenuButton type="submit" tooltip="Sign out"><LogOut /><span>Sign out</span></SidebarMenuButton></form> : <SidebarMenuButton render={<a href="/login" />} tooltip={cookie ? "Reset sign-in" : "Sign in"}><LogOut /><span>{cookie ? "Reset sign-in" : "Sign in"}</span></SidebarMenuButton>}</SidebarMenuItem>
               </SidebarMenu>
             </SidebarFooter>
           </Sidebar>
-          <SidebarInset className="page">{children}</SidebarInset>
-        </SidebarProvider>
-        </TooltipProvider>
+        }>{children}</WorkspaceShell>
       </body>
     </html>
   )

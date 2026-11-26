@@ -841,9 +841,12 @@ fn interval_measure(intervals: &[Interval]) -> u64 {
         .sum()
 }
 
-/// Derive credited time as a union of intervals, never as a sum of concurrent
-/// harness sessions. Agent output by itself creates no credit: a run counts
-/// only when a subsequent human-presence event arrives within the idle limit.
+/// Derive elapsed collaboration time as a union of intervals, never as a sum
+/// of concurrent harness sessions. Agent runs are measured from a prompt to
+/// the last response event (with a cap), even if the historical transcript
+/// ends before the user returns. This makes the agent-time display useful for
+/// imported history; scoring policy can still decide whether that interval is
+/// creditable human presence.
 pub fn account_time<P, I>(
     events: &[NormalizedEvent<P, I>],
     config: TimeAccountingConfig,
@@ -881,16 +884,7 @@ pub fn account_time<P, I>(
             .iter()
             .rev()
             .find(|event| event.role == ActorRole::Agent);
-        let next_presence = timeline[next_prompt..]
-            .iter()
-            .find(|event| is_presence(event));
-        if let (Some(last_agent), Some(follow_up)) = (last_agent, next_presence)
-            && follow_up
-                .occurred_at
-                .0
-                .saturating_sub(last_agent.occurred_at.0)
-                <= config.follow_up_idle_limit_millis
-        {
+        if let Some(last_agent) = last_agent {
             agent.push((
                 prompt.occurred_at.0,
                 last_agent.occurred_at.0.min(

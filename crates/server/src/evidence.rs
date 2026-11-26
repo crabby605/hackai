@@ -17,7 +17,7 @@ use sqlx::Row;
 
 use crate::AppState;
 
-const MAX_EVENTS: usize = 1_000;
+const MAX_EVENTS: usize = 5_000;
 const MAX_REASON_CODES: usize = 16;
 
 #[derive(Deserialize)]
